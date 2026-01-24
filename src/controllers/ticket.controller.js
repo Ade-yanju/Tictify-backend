@@ -1,94 +1,3 @@
-// import Ticket from "../models/Ticket.js";
-// import Event from "../models/Event.js";
-// import mongoose from "mongoose";
-
-// export const getOrganizerTicketSales = async (req, res) => {
-//   try {
-//     const organizerId = new mongoose.Types.ObjectId(req.user._id);
-
-//     /* ================= TOTAL STATS ================= */
-//     const totals = await Ticket.aggregate([
-//       {
-//         $lookup: {
-//           from: "events",
-//           localField: "event",
-//           foreignField: "_id",
-//           as: "event",
-//         },
-//       },
-//       { $unwind: "$event" },
-//       {
-//         $match: {
-//           "event.organizer": organizerId,
-//         },
-//       },
-//       {
-//         $group: {
-//           _id: null,
-//           totalTickets: { $sum: 1 },
-//           scanned: {
-//             $sum: { $cond: ["$scanned", 1, 0] },
-//           },
-//           unscanned: {
-//             $sum: { $cond: ["$scanned", 0, 1] },
-//           },
-//           totalRevenue: {
-//             $sum: "$event.ticketPrice",
-//           },
-//         },
-//       },
-//     ]);
-
-//     /* ================= EVENT BREAKDOWN ================= */
-//     const events = await Ticket.aggregate([
-//       {
-//         $lookup: {
-//           from: "events",
-//           localField: "event",
-//           foreignField: "_id",
-//           as: "event",
-//         },
-//       },
-//       { $unwind: "$event" },
-//       {
-//         $match: {
-//           "event.organizer": organizerId,
-//         },
-//       },
-//       {
-//         $group: {
-//           _id: "$event._id",
-//           title: { $first: "$event.title" },
-//           status: { $first: "$event.status" },
-//           ticketsSold: { $sum: 1 },
-//           revenue: { $sum: "$event.ticketPrice" },
-//         },
-//       },
-//       { $sort: { ticketsSold: -1 } },
-//     ]);
-
-//     res.json({
-//       stats: totals[0] || {
-//         totalTickets: 0,
-//         totalRevenue: 0,
-//         scanned: 0,
-//         unscanned: 0,
-//       },
-//       events: events.map((e) => ({
-//         eventId: e._id,
-//         title: e.title,
-//         status: e.status,
-//         ticketsSold: e.ticketsSold,
-//         revenue: e.revenue,
-//       })),
-//     });
-//   } catch (error) {
-//     console.error("TICKET SALES ERROR:", error);
-//     res.status(500).json({
-//       message: "Failed to load ticket sales",
-//     });
-//   }
-// };
 import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
 import mongoose from "mongoose";
@@ -105,9 +14,9 @@ export const getTicketByReference = async (req, res) => {
       return res.status(400).json({ message: "Reference is required" });
     }
 
-    const ticket = await Ticket.findOne({
-      paymentRef: reference,
-    }).populate("event");
+    const ticket = await Ticket.findOne({ paymentRef: reference }).populate(
+      "event",
+    );
 
     if (!ticket || !ticket.event) {
       return res.status(404).json({ message: "Ticket not found" });
@@ -139,7 +48,6 @@ export const getOrganizerTicketSales = async (req, res) => {
   try {
     const organizerId = new mongoose.Types.ObjectId(req.user._id);
 
-    /* ================= OVERALL STATS ================= */
     const totalsAgg = await Ticket.aggregate([
       { $match: { organizer: organizerId } },
       {
@@ -164,7 +72,6 @@ export const getOrganizerTicketSales = async (req, res) => {
       totalRevenue: 0,
     };
 
-    /* ================= EVENT BREAKDOWN ================= */
     const eventsAgg = await Ticket.aggregate([
       { $match: { organizer: organizerId } },
       {
@@ -207,59 +114,62 @@ export const getOrganizerTicketSales = async (req, res) => {
     });
   } catch (error) {
     console.error("TICKET SALES ERROR:", error);
-    res.status(500).json({ message: "Failed to load ticket sales" });
+    return res.status(500).json({ message: "Failed to load ticket sales" });
   }
 };
 
+/* =====================================================
+   SCAN TICKET (ORGANIZER ONLY)
+===================================================== */
 export const scanTicketController = async (req, res) => {
-  const { code, eventId } = req.body;
-  const organizerId = req.user._id; // from JWT
+  try {
+    const { code, eventId } = req.body;
+    const organizerId = req.user._id;
 
-  if (!code || !eventId) {
-    return res.status(400).json({ message: "Invalid scan data" });
-  }
+    if (!code || !eventId) {
+      return res.status(400).json({ message: "Invalid scan data" });
+    }
 
-  /* 1️⃣ VERIFY EVENT OWNERSHIP */
-  const event = await Event.findOne({
-    _id: eventId,
-    organizer: organizerId,
-    status: "LIVE",
-  });
-
-  if (!event) {
-    return res.status(403).json({
-      message: "You are not authorized to scan tickets for this event",
+    /* 1️⃣ VERIFY EVENT OWNERSHIP */
+    const event = await Event.findOne({
+      _id: eventId,
+      organizer: organizerId,
+      status: "LIVE",
     });
-  }
 
-  /* 2️⃣ FIND TICKET */
-  const ticket = await Ticket.findOne({
-    qrCode: code,
-    event: eventId,
-  });
+    if (!event) {
+      return res.status(403).json({
+        message: "You are not authorized to scan tickets for this event",
+      });
+    }
 
-  if (!ticket) {
-    return res.status(404).json({
-      message: "Invalid ticket",
+    /* 2️⃣ FIND TICKET */
+    const ticket = await Ticket.findOne({
+      qrCode: code,
+      event: eventId,
     });
-  }
 
-  /* 3️⃣ CHECK IF ALREADY USED */
-  if (ticket.scanned) {
-    return res.status(409).json({
-      message: "Ticket already used",
+    if (!ticket) {
+      return res.status(404).json({ message: "Invalid ticket" });
+    }
+
+    /* 3️⃣ ALREADY USED */
+    if (ticket.scanned) {
+      return res.status(409).json({ message: "Ticket already used" });
+    }
+
+    /* 4️⃣ MARK AS SCANNED */
+    ticket.scanned = true;
+    ticket.scannedAt = new Date();
+    await ticket.save();
+
+    return res.json({
+      message: "Access granted",
+      attendee: ticket.buyerEmail,
+      ticketType: ticket.ticketType,
     });
+  } catch (error) {
+    console.error("SCAN ERROR:", error);
+    return res.status(500).json({ message: "Scan failed" });
   }
-
-  /* 4️⃣ MARK AS SCANNED */
-  ticket.scanned = true;
-  ticket.scannedAt = new Date();
-  await ticket.save();
-
-  /* 5️⃣ SUCCESS */
-  return res.json({
-    message: "Access granted",
-    attendee: ticket.buyerEmail,
-    ticketType: ticket.ticketType,
-  });
 };

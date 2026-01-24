@@ -12,45 +12,50 @@ export const initiatePayment = async (req, res) => {
 
     const event = await Event.findById(eventId);
     if (!event || event.status !== "LIVE") {
-      return res.status(400).json({ message: "Event not available" });
+      return res.status(400).json({ message: "Invalid event" });
     }
 
-    const ticket = event.ticketTypes.find((t) => t.name === ticketType);
+    const ticket = event.ticketTypes.find(t => t.name === ticketType);
     if (!ticket) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
 
     const amount = Number(ticket.price);
 
-    // 🔐 REAL reference
-    const reference = `TICTIFY_${Date.now()}_${crypto.randomBytes(6).toString("hex")}`;
+    const reference = `TICTIFY-${crypto.randomBytes(8).toString("hex")}`;
 
-    // 🧾 CREATE PAYMENT RECORD (PENDING)
-    await Payment.create({
-      event: eventId,
-      organizer: event.organizer,
-      ticketType,
-      email,
-      amount,
-      reference,
-      status: "PENDING",
-    });
-
-    // 🟢 INIT ERCASPAY
-    const paymentUrl = await initiateErcaspay({
-      amount,
-      email,
-      reference,
-      metadata: {
-        eventId,
-        ticketType,
-        email,
+    // 🔗 ERCASPAY INIT
+    const ercaspayRes = await fetch("https://api.ercaspay.com/api/v1/payments", {
+      method: "POST",
+      headers: {
+        "Authorization": `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+        "Content-Type": "application/json",
       },
+      body: JSON.stringify({
+        amount,
+        currency: "NGN",
+        email,
+        reference,
+        callback_url: `${process.env.FRONTEND_URL}/payment/processing`,
+        metadata: {
+          eventId,
+          ticketType,
+          email,
+        },
+      }),
     });
 
-    return res.json({ paymentUrl });
-  } catch (error) {
-    console.error("PAYMENT INIT ERROR:", error);
+    const ercaspayData = await ercaspayRes.json();
+
+    if (!ercaspayData?.data?.checkout_url) {
+      throw new Error("ERCASPAY init failed");
+    }
+
+    return res.json({
+      paymentUrl: ercaspayData.data.checkout_url,
+    });
+  } catch (err) {
+    console.error("PAYMENT INIT ERROR:", err);
     return res.status(500).json({ message: "Unable to initialize payment" });
   }
 };

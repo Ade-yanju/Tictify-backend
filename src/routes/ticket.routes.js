@@ -1,25 +1,21 @@
 import express from "express";
-import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 import {
-  getOrganizerTicketSales,
   getTicketByReference,
+  getOrganizerTicketSales,
+  scanTicketController,
 } from "../controllers/ticket.controller.js";
 
-import { scanTicket } from "../controllers/ticket.scan.controller.js";
+import authMiddleware from "../middleware/auth.middleware.js";
+import organizerOnly from "../middleware/organizer.middleware.js";
+
 const router = express.Router();
 
-/* ================= ORGANIZER ================= */
-
-// Ticket sales dashboard
-router.get(
-  "/sales/organizer",
-  authenticate,
-  authorize("organizer"),
-  getOrganizerTicketSales,
-);
-// routes/ticket.routes.js
+/* Public */
 router.get("/by-reference/:reference", getTicketByReference);
 
-router.post("/scan", authenticate, authorize("organizer"), scanTicket);
+/* Organizer */
+router.get("/sales", authMiddleware, organizerOnly, getOrganizerTicketSales);
+
+router.post("/scan", authMiddleware, organizerOnly, scanTicketController);
 
 export default router;

@@ -16,7 +16,7 @@ export const handlePaymentWebhook = async (req, res) => {
 
     const expectedSignature = crypto
       .createHmac("sha256", process.env.ERCASPAY_WEBHOOK_SECRET)
-      .update(req.body)
+      .update(req.body) // ⚠️ RAW BODY BUFFER
       .digest("hex");
 
     if (signature !== expectedSignature) {
@@ -51,17 +51,19 @@ export const handlePaymentWebhook = async (req, res) => {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
 
-    /* ================= SAVE PAYMENT ================= */
     const amount = Number(ticketConfig.price);
 
+    /* ================= SAVE PAYMENT ================= */
     await Payment.findOneAndUpdate(
       { reference },
       {
+        reference,
         status: "SUCCESS",
         amount,
         email,
         event: eventId,
         organizer: event.organizer,
+        currency: "NGN",
       },
       { upsert: true, new: true },
     );
