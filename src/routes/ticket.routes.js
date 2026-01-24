@@ -3,6 +3,7 @@ import {
   getTicketByReference,
   getOrganizerTicketSales,
   scanTicketController,
+  createFreeTicket,
 } from "../controllers/ticket.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";

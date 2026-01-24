@@ -178,10 +178,6 @@ export const createFreeTicket = async (req, res) => {
   try {
     const { eventId, email, ticketType } = req.body;
 
-    if (!eventId || !email || !ticketType) {
-      return res.status(400).json({ message: "Invalid request" });
-    }
-
     const event = await Event.findById(eventId);
     if (!event || event.status !== "LIVE") {
       return res.status(400).json({ message: "Invalid event" });
@@ -195,23 +191,22 @@ export const createFreeTicket = async (req, res) => {
       return res.status(400).json({ message: "Invalid free ticket" });
     }
 
-    const reference = `FREE-${crypto.randomBytes(8).toString("hex")}`;
+    const ticketCode = crypto.randomBytes(16).toString("hex");
+    const qrImage = await generateQRCode(ticketCode);
 
     await Ticket.create({
       event: eventId,
       organizer: event.organizer,
       buyerEmail: email,
-      ticketType,
-      qrCode: crypto.randomBytes(16).toString("hex"),
+      qrCode: ticketCode,
       scanned: false,
-      paymentRef: reference,
+      ticketType,
       amountPaid: 0,
       currency: "NGN",
     });
 
-    return res.json({ reference });
+    return res.json({ success: true });
   } catch (err) {
-    console.error("FREE TICKET ERROR:", err);
-    return res.status(500).json({ message: "Unable to issue free ticket" });
+    return res.status(500).json({ message: "Failed to create free ticket" });
   }
 };
