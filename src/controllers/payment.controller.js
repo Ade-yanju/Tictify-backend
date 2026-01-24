@@ -70,7 +70,7 @@ export const initiatePayment = async (req, res) => {
     });
 
     const ercaspayRes = await fetch(
-      "https://api.ercaspay.com/api/v1/payment/initialize",
+      "https://api.ercaspay.com/api/v1/payment/initiate",
       {
         method: "POST",
         headers: {
