@@ -5,7 +5,7 @@ import {
   scanTicketController,
 } from "../controllers/ticket.controller.js";
 
-import { authenticate, authorize } from "../middleware/auth.middleware.js";
+import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
