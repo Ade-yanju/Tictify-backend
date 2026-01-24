@@ -210,3 +210,56 @@ export const getOrganizerTicketSales = async (req, res) => {
     res.status(500).json({ message: "Failed to load ticket sales" });
   }
 };
+
+export const scanTicketController = async (req, res) => {
+  const { code, eventId } = req.body;
+  const organizerId = req.user._id; // from JWT
+
+  if (!code || !eventId) {
+    return res.status(400).json({ message: "Invalid scan data" });
+  }
+
+  /* 1️⃣ VERIFY EVENT OWNERSHIP */
+  const event = await Event.findOne({
+    _id: eventId,
+    organizer: organizerId,
+    status: "LIVE",
+  });
+
+  if (!event) {
+    return res.status(403).json({
+      message: "You are not authorized to scan tickets for this event",
+    });
+  }
+
+  /* 2️⃣ FIND TICKET */
+  const ticket = await Ticket.findOne({
+    qrCode: code,
+    event: eventId,
+  });
+
+  if (!ticket) {
+    return res.status(404).json({
+      message: "Invalid ticket",
+    });
+  }
+
+  /* 3️⃣ CHECK IF ALREADY USED */
+  if (ticket.scanned) {
+    return res.status(409).json({
+      message: "Ticket already used",
+    });
+  }
+
+  /* 4️⃣ MARK AS SCANNED */
+  ticket.scanned = true;
+  ticket.scannedAt = new Date();
+  await ticket.save();
+
+  /* 5️⃣ SUCCESS */
+  return res.json({
+    message: "Access granted",
+    attendee: ticket.buyerEmail,
+    ticketType: ticket.ticketType,
+  });
+};
