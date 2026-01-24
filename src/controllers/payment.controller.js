@@ -69,16 +69,17 @@ export const initiatePayment = async (req, res) => {
       provider: "ERCASPAY",
     });
 
-    const ercaspayRes = await fetch(
+        const ercaspayRes = await fetch(
       "https://api.ercaspay.com/api/v1/payments",
       {
         method: "POST",
         headers: {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         body: JSON.stringify({
-          amount,
+          amount: amount * 100, // 🔴 IMPORTANT: convert to kobo
           currency: "NGN",
           email,
           reference,
@@ -92,14 +93,31 @@ export const initiatePayment = async (req, res) => {
       },
     );
 
-    const ercaspayData = await ercaspayRes.json();
+    const contentType = ercaspayRes.headers.get("content-type");
+    const rawText = await ercaspayRes.text();
 
-    if (!ercaspayRes.ok || !ercaspayData?.data?.checkout_url) {
-      console.error("ERCASPAY INIT FAILED:", ercaspayData);
+    if (!ercaspayRes.ok) {
+      console.error("ERCASPAY HTTP ERROR:", rawText);
+      await Payment.updateOne(
+        { reference },
+        { status: "FAILED" },
+      );
+      return res.status(500).json({
+        message: "Payment gateway error",
+      });
+    }
 
-      // Mark payment as FAILED
-      await Payment.updateOne({ reference }, { status: "FAILED" });
+    if (!contentType || !contentType.includes("application/json")) {
+      console.error("ERCASPAY NON-JSON RESPONSE:", rawText);
+      return res.status(500).json({
+        message: "Invalid response from payment gateway",
+      });
+    }
 
+    const ercaspayData = JSON.parse(rawText);
+
+    if (!ercaspayData?.data?.checkout_url) {
+      console.error("ERCASPAY INVALID PAYLOAD:", ercaspayData);
       return res.status(500).json({
         message: "Unable to initialize payment",
       });
@@ -110,8 +128,8 @@ export const initiatePayment = async (req, res) => {
       reference,
     });
   } catch (err) {
-    console.error("PAYMENT INIT ERROR:", err);
-    return res.status(500).json({ message: "Unable to initialize payment" });
+    console.error("INITIATE PAYMENT ERROR:", err);
+    return res.status(500).json({ message: "Payment initialization failed" });
   }
 };
 
