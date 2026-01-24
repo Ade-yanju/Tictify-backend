@@ -69,8 +69,8 @@ export const initiatePayment = async (req, res) => {
       provider: "ERCASPAY",
     });
 
-        const ercaspayRes = await fetch(
-      "https://api.ercaspay.com/api/v1/payments",
+    const ercaspayRes = await fetch(
+      "https://api.ercaspay.com/api/v1/payment/initialize",
       {
         method: "POST",
         headers: {
@@ -98,10 +98,7 @@ export const initiatePayment = async (req, res) => {
 
     if (!ercaspayRes.ok) {
       console.error("ERCASPAY HTTP ERROR:", rawText);
-      await Payment.updateOne(
-        { reference },
-        { status: "FAILED" },
-      );
+      await Payment.updateOne({ reference }, { status: "FAILED" });
       return res.status(500).json({
         message: "Payment gateway error",
       });
