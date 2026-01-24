@@ -5,17 +5,26 @@ import {
   scanTicketController,
 } from "../controllers/ticket.controller.js";
 
-import authMiddleware from "../middleware/auth.middleware.js";
-import organizerOnly from "../middleware/organizer.middleware.js";
+import { authenticate, authorize } from "../middleware/auth.middleware.js";
 
 const router = express.Router();
 
-/* Public */
+/* ========= PUBLIC ========= */
 router.get("/by-reference/:reference", getTicketByReference);
 
-/* Organizer */
-router.get("/sales", authMiddleware, organizerOnly, getOrganizerTicketSales);
+/* ========= ORGANIZER ========= */
+router.get(
+  "/sales",
+  authenticate,
+  authorize("organizer"),
+  getOrganizerTicketSales,
+);
 
-router.post("/scan", authMiddleware, organizerOnly, scanTicketController);
+router.post(
+  "/scan",
+  authenticate,
+  authorize("organizer"),
+  scanTicketController,
+);
 
 export default router;
