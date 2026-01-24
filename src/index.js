@@ -19,9 +19,30 @@ import adminWithdrawalRoutes from "./routes/admin.withdrawal.routes.js";
 
 const app = express();
 
-app.use(cors({ origin: "http://localhost:5173" }));
+/* ================= CORS ================= */
+const allowedOrigins = [
+  "http://localhost:5173",
+  "https://tictify.vercel.app",
+  "https://www.tictify.ng",
+];
+
+app.use(
+  cors({
+    origin: (origin, callback) => {
+      if (!origin) return callback(null, true);
+      if (allowedOrigins.includes(origin)) {
+        callback(null, true);
+      } else {
+        callback(new Error("CORS not allowed"));
+      }
+    },
+    credentials: true,
+  }),
+);
+
 app.use(express.json());
 
+/* ================= ROUTES ================= */
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
 app.use("/api/tickets", ticketRoutes);
@@ -31,10 +52,11 @@ app.use("/api/withdrawals", withdrawalRoutes);
 app.use("/api/payments", paymentRoutes);
 app.use("/api/webhooks", webhookRoutes);
 app.use("/api/organizer", organizerRoutes);
-
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin", adminWithdrawalRoutes);
-const PORT = 5000;
+
+/* ================= SERVER ================= */
+const PORT = process.env.PORT || 5000;
 
 await mongoose.connect(process.env.MONGO_URI);
 console.log("MongoDB connected");
