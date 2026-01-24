@@ -7,7 +7,25 @@ import { generateQRCode } from "../utils/qr.js";
 
 export const handlePaymentWebhook = async (req, res) => {
   try {
-    const payload = req.body;
+    /* ================= VERIFY SIGNATURE ================= */
+    const signature = req.headers["x-ercaspay-signature"];
+
+    if (!signature) {
+      return res.status(400).send("Missing signature");
+    }
+
+    const expectedSignature = crypto
+      .createHmac("sha256", process.env.ERCASPAY_WEBHOOK_SECRET)
+      .update(req.body)
+      .digest("hex");
+
+    if (signature !== expectedSignature) {
+      console.error("❌ Invalid ERCASPAY signature");
+      return res.status(401).send("Invalid signature");
+    }
+
+    /* ================= PARSE PAYLOAD ================= */
+    const payload = JSON.parse(req.body.toString());
 
     if (payload.status !== "SUCCESS") {
       return res.status(200).json({ received: true });
@@ -16,45 +34,57 @@ export const handlePaymentWebhook = async (req, res) => {
     const { reference, metadata } = payload;
     const { eventId, email, ticketType } = metadata;
 
-    // 🔒 IDENTITY CHECK
-    const payment = await Payment.findOne({ reference });
-    if (!payment || payment.status === "SUCCESS") {
+    /* ================= IDEMPOTENCY CHECK ================= */
+    const existingPayment = await Payment.findOne({ reference });
+    if (existingPayment?.status === "SUCCESS") {
       return res.status(200).json({ received: true });
     }
 
+    /* ================= VALIDATE EVENT ================= */
     const event = await Event.findById(eventId);
     if (!event || event.status !== "LIVE") {
       return res.status(400).json({ message: "Invalid event" });
     }
 
-    const ticketDef = event.ticketTypes.find((t) => t.name === ticketType);
-    if (!ticketDef) {
-      return res.status(400).json({ message: "Invalid ticket" });
+    const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
+    if (!ticketConfig) {
+      return res.status(400).json({ message: "Invalid ticket type" });
     }
 
-    // 🟢 MARK PAYMENT SUCCESS
-    payment.status = "SUCCESS";
-    await payment.save();
+    /* ================= SAVE PAYMENT ================= */
+    const amount = Number(ticketConfig.price);
 
-    // 🎟️ GENERATE TICKET
+    await Payment.findOneAndUpdate(
+      { reference },
+      {
+        status: "SUCCESS",
+        amount,
+        email,
+        event: eventId,
+        organizer: event.organizer,
+      },
+      { upsert: true, new: true },
+    );
+
+    /* ================= CREATE TICKET ================= */
     const ticketCode = crypto.randomBytes(16).toString("hex");
-    const qrCode = await generateQRCode(ticketCode);
+    const qrImage = await generateQRCode(ticketCode);
 
     await Ticket.create({
-      event: event._id,
+      event: eventId,
       organizer: event.organizer,
       buyerEmail: email,
       qrCode: ticketCode,
       scanned: false,
       paymentRef: reference,
-      amountPaid: payment.amount,
+      amountPaid: amount,
       ticketType,
       currency: "NGN",
     });
 
-    // 💰 WALLET CREDIT
-    const platformFee = Math.round(payment.amount * 0.03 + 80);
-    const organizerAmount = payment.amount - platformFee;
+    /* ================= CREDIT WALLET ================= */
+    const platformFee = Math.round(amount * 0.03 + 80);
+    const organizerAmount = amount - platformFee;
 
     let wallet = await Wallet.findOne({ organizer: event.organizer });
     if (!wallet) {
@@ -72,6 +102,6 @@ export const handlePaymentWebhook = async (req, res) => {
     return res.status(200).json({ received: true });
   } catch (error) {
     console.error("WEBHOOK ERROR:", error);
-    return res.status(500).json({ received: false });
+    return res.status(500).send("Webhook error");
   }
 };
