@@ -86,6 +86,8 @@ export const initiatePayment = async (req, res) => {
           customerEmail: email, // ✅ REQUIRED
           merchantId: process.env.ERCASPAY_MERCHANT_ID, // ✅ REQUIRED
 
+          paymentMethods: ["card", "bank_transfer", "ussd"],
+
           redirectUrl: `${process.env.FRONTEND_URL}/payment/processing`, // ✅ REQUIRED
           callbackUrl: `${process.env.BACKEND_URL}/api/webhooks/ercaspay`, // ✅ REQUIRED
 
