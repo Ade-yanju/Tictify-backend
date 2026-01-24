@@ -173,3 +173,45 @@ export const scanTicketController = async (req, res) => {
     return res.status(500).json({ message: "Scan failed" });
   }
 };
+
+export const createFreeTicket = async (req, res) => {
+  try {
+    const { eventId, email, ticketType } = req.body;
+
+    if (!eventId || !email || !ticketType) {
+      return res.status(400).json({ message: "Invalid request" });
+    }
+
+    const event = await Event.findById(eventId);
+    if (!event || event.status !== "LIVE") {
+      return res.status(400).json({ message: "Invalid event" });
+    }
+
+    const ticketConfig = event.ticketTypes.find(
+      (t) => t.name === ticketType && t.price === 0,
+    );
+
+    if (!ticketConfig) {
+      return res.status(400).json({ message: "Invalid free ticket" });
+    }
+
+    const reference = `FREE-${crypto.randomBytes(8).toString("hex")}`;
+
+    await Ticket.create({
+      event: eventId,
+      organizer: event.organizer,
+      buyerEmail: email,
+      ticketType,
+      qrCode: crypto.randomBytes(16).toString("hex"),
+      scanned: false,
+      paymentRef: reference,
+      amountPaid: 0,
+      currency: "NGN",
+    });
+
+    return res.json({ reference });
+  } catch (err) {
+    console.error("FREE TICKET ERROR:", err);
+    return res.status(500).json({ message: "Unable to issue free ticket" });
+  }
+};

@@ -27,4 +27,6 @@ router.post(
   scanTicketController,
 );
 
+router.post("/free", createFreeTicket);
+
 export default router;
