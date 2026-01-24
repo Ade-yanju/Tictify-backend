@@ -79,11 +79,16 @@ export const initiatePayment = async (req, res) => {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          amount: amount * 100, // 🔴 IMPORTANT: convert to kobo
+          amount: amount * 100, // MUST be kobo
           currency: "NGN",
-          email,
-          reference,
-          callback_url: `${process.env.FRONTEND_URL}/payment/processing`,
+
+          paymentReference: reference, // ✅ REQUIRED
+          customerEmail: email, // ✅ REQUIRED
+          merchantId: process.env.ERCASPAY_MERCHANT_ID, // ✅ REQUIRED
+
+          redirectUrl: `${process.env.FRONTEND_URL}/payment/processing`, // ✅ REQUIRED
+          callbackUrl: `${process.env.BACKEND_URL}/api/webhooks/ercaspay`, // ✅ REQUIRED
+
           metadata: {
             eventId,
             ticketType,
