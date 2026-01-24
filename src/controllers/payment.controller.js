@@ -4,7 +4,7 @@ import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 
 /* =====================================================
-   INITIATE PAYMENT (ERCASPAY)
+   INITIATE PAYMENT (FREE OR ERCASPAY)
 ===================================================== */
 export const initiatePayment = async (req, res) => {
   try {
@@ -26,13 +26,38 @@ export const initiatePayment = async (req, res) => {
     }
 
     const amount = Number(ticket.price);
-    if (amount < 0) {
+    if (isNaN(amount) || amount < 0) {
       return res.status(400).json({ message: "Invalid ticket price" });
     }
 
     const reference = `TICTIFY-${crypto.randomBytes(10).toString("hex")}`;
 
-    /* ================= SAVE PENDING PAYMENT ================= */
+    /* =====================================================
+       FREE TICKET FLOW (NO ERCASPAY)
+    ===================================================== */
+    if (amount === 0) {
+      await Payment.create({
+        reference,
+        event: eventId,
+        organizer: event.organizer,
+        ticketType,
+        email,
+        amount: 0,
+        status: "SUCCESS",
+        provider: "FREE",
+      });
+
+      return res.json({
+        paymentUrl: `${process.env.FRONTEND_URL}/payment/free-success?ref=${reference}`,
+        reference,
+      });
+    }
+
+    /* =====================================================
+       PAID TICKET FLOW (ERCASPAY)
+    ===================================================== */
+
+    // Save pending payment FIRST (important for webhook)
     await Payment.create({
       reference,
       event: eventId,
@@ -41,9 +66,9 @@ export const initiatePayment = async (req, res) => {
       email,
       amount,
       status: "PENDING",
+      provider: "ERCASPAY",
     });
 
-    /* ================= ERCASPAY INIT ================= */
     const ercaspayRes = await fetch(
       "https://api.ercaspay.com/api/v1/payments",
       {
@@ -71,10 +96,15 @@ export const initiatePayment = async (req, res) => {
 
     if (!ercaspayRes.ok || !ercaspayData?.data?.checkout_url) {
       console.error("ERCASPAY INIT FAILED:", ercaspayData);
-      return res.status(500).json({ message: "Unable to initialize payment" });
+
+      // Mark payment as FAILED
+      await Payment.updateOne({ reference }, { status: "FAILED" });
+
+      return res.status(500).json({
+        message: "Unable to initialize payment",
+      });
     }
 
-    /* ================= SUCCESS ================= */
     return res.json({
       paymentUrl: ercaspayData.data.checkout_url,
       reference,
@@ -86,7 +116,7 @@ export const initiatePayment = async (req, res) => {
 };
 
 /* =====================================================
-   PAYMENT STATUS (FOR FRONTEND POLLING)
+   PAYMENT STATUS (FRONTEND POLLING)
 ===================================================== */
 export const getPaymentStatus = async (req, res) => {
   try {
