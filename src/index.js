@@ -1,13 +1,6 @@
 import dotenv from "dotenv";
 dotenv.config();
 
-console.log("EMAIL ENV CHECK:", {
-  host: process.env.EMAIL_HOST,
-  port: process.env.EMAIL_PORT,
-  user: process.env.EMAIL_USER,
-  pass: process.env.EMAIL_PASS ? "SET" : "MISSING",
-});
-
 import express from "express";
 import mongoose from "mongoose";
 import cors from "cors";
