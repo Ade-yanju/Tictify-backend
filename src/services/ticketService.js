@@ -1,7 +1,7 @@
 import { getToken } from "./authService";
 
 export async function scanTicket(code) {
-  const res = await fetch("http://localhost:5000/api/tickets/scan", {
+  const res = await fetch(`${import.meta.env.VITE_API_URL}/api/tickets/scan`, {
     method: "POST",
     headers: {
       "Content-Type": "application/json",

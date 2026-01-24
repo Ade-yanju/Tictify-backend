@@ -16,16 +16,19 @@ export const adminDashboard = async (req, res) => {
         User.find({ role: "organizer" }),
       ]);
 
+    /* ================= TOTAL REVENUE ================= */
     const totalRevenue = tickets.reduce(
       (sum, t) => sum + (t.amountPaid || 0),
       0,
     );
 
-    const platformFees = wallets.reduce(
-      (sum, w) => sum + (w.platformFeesPaid || 0),
+    /* ================= PLATFORM FEES (FIXED) ================= */
+    const platformFees = tickets.reduce(
+      (sum, t) => sum + Math.round((t.amountPaid || 0) * 0.03 + 80),
       0,
     );
 
+    /* ================= TOP ORGANIZERS ================= */
     const topOrganizers = wallets
       .sort((a, b) => b.totalEarnings - a.totalEarnings)
       .slice(0, 5);
@@ -33,7 +36,7 @@ export const adminDashboard = async (req, res) => {
     res.json({
       stats: {
         totalRevenue,
-        platformFees,
+        platformFees, // ✅ NOW CORRECT
         totalTicketsSold: tickets.length,
         totalEvents: events.length,
         totalOrganizers: organizers.length,
