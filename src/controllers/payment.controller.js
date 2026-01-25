@@ -87,6 +87,7 @@ export const initiatePayment = async (req, res) => {
           amount: amount * 100, // kobo
           paymentReference: reference,
           paymentMethods: "card,bank-transfer,ussd",
+          customerName: name,
           customerEmail: email,
           currency: "NGN",
           redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
