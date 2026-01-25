@@ -152,3 +152,25 @@ export const verifyPayment = async (req, res) => {
     res.status(500).json({ status: "ERROR" });
   }
 };
+export const getPaymentStatus = async (req, res) => {
+  try {
+    const { reference } = req.params;
+
+    if (!reference) {
+      return res.status(400).json({ status: "INVALID_REFERENCE" });
+    }
+
+    const payment = await Payment.findOne({ reference });
+
+    if (!payment) {
+      return res.status(404).json({ status: "NOT_FOUND" });
+    }
+
+    return res.json({
+      status: payment.status, // PENDING | SUCCESS | FAILED
+    });
+  } catch (err) {
+    console.error("PAYMENT STATUS ERROR:", err);
+    return res.status(500).json({ status: "ERROR" });
+  }
+};
