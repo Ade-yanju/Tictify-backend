@@ -74,42 +74,55 @@ export const initiatePayment = async (req, res) => {
       },
     };
 
-    const ercaspayRes = await fetch(
-      "https://api.ercaspay.com/api/v1/payment/initiate",
-      {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
-          "Content-Type": "application/json",
-          Accept: "application/json",
-        },
-        body: JSON.stringify(payload),
-      }
-    );
+const ercaspayRes = await fetch(
+  "https://api.ercaspay.com/api/v1/payment/initiate",
+  {
+    method: "POST",
+    headers: {
+      Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+      "Content-Type": "application/json",
+      Accept: "application/json",
+    },
+    body: JSON.stringify({
+      amount: amount * 100, // kobo
+      paymentReference: reference,
+      paymentMethods: "card,bank_transfer,ussd",
+      customerEmail: email,
+      currency: "NGN",
+      redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
+      metadata: {
+        eventId,
+        ticketType,
+        email,
+      },
+    }),
+  }
+);
 
-    const raw = await ercaspayRes.text();
+const ercaspayData = await ercaspayRes.json();
 
-    let data;
-    try {
-      data = JSON.parse(raw);
-    } catch {
-      console.error("ERCASPAY NON-JSON RESPONSE:", raw);
-      return res.status(500).json({ message: "Invalid gateway response" });
-    }
+/* ✅ HARD VALIDATION */
+if (
+  !ercaspayData ||
+  ercaspayData.requestSuccessful !== true ||
+  !ercaspayData.responseBody?.checkoutUrl
+) {
+  console.error("ERCASPAY INIT FAILED:", ercaspayData);
+  await Payment.updateOne({ reference }, { status: "FAILED" });
 
-    if (!ercaspayRes.ok || !data?.data?.checkoutUrl) {
-      console.error("ERCASPAY ERROR:", data);
-      return res.status(500).json({ message: "Payment initialization failed" });
-    }
+  return res.status(500).json({
+    message: "Unable to initialize payment",
+  });
+}
 
-    return res.json({
-      paymentUrl: data.data.checkoutUrl,
-      reference,
-    });
-
+/* ✅ SUCCESS */
+return res.json({
+  reference,
+  paymentUrl: ercaspayData.responseBody.checkoutUrl,
+});
   } catch (err) {
-    console.error("INIT PAYMENT ERROR:", err);
-    res.status(500).json({ message: "Payment initialization failed" });
+    console.error("INITIATE ERROR:", err);
+    return res.status(500).json({ message: "Payment initialization failed" });
   }
 };
 
