@@ -136,70 +136,26 @@ export const initiatePayment = async (req, res) => {
 ===================================================== */
 export const paymentCallback = async (req, res) => {
   try {
-    const { ref } = req.query;
+    // ERCASPAY MAY NOT SEND ref CONSISTENTLY
+    const ref =
+      req.query.ref ||
+      req.query.reference ||
+      req.query.paymentReference;
+
     if (!ref) {
-      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
+      // STILL redirect to success – frontend will handle waiting
+      return res.redirect(`${process.env.FRONTEND_URL}/success`);
     }
 
-    const payment = await Payment.findOne({ reference: ref });
-    if (!payment) {
-      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
-    }
+    // DO NOT VERIFY HERE
+    // DO NOT FAIL HERE
+    // DO NOT BLOCK HERE
 
-    // If already successful, go straight to success page
-    if (payment.status === "SUCCESS") {
-      return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
-    }
-
-    /* ================= VERIFY WITH ERCASPAY ================= */
-    const verifyRes = await fetch(
-      `https://api.ercaspay.com/api/v1/payment/transaction/verify/${ref}`,
-      {
-        headers: {
-          Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
-          Accept: "application/json",
-        },
-      },
-    );
-
-    const data = await verifyRes.json();
-
-    const isSuccess =
-      data?.requestSuccessful === true &&
-      data?.responseBody?.transactionStatus === "SUCCESSFUL";
-
-    // ❌ Only fail if ERCASPAY explicitly says failed
-    if (!isSuccess) {
-      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
-    }
-
-    /* ================= MARK PAYMENT SUCCESS ================= */
-    payment.status = "SUCCESS";
-    await payment.save();
-
-    /* ================= CREATE TICKET (NON-BLOCKING) ================= */
-    // Fire-and-forget style (safe & idempotent)
-    Ticket.findOne({ paymentRef: ref }).then(async (existing) => {
-      if (existing) return;
-
-      const event = await Event.findById(payment.event);
-
-      await Ticket.create({
-        event: event._id,
-        organizer: event.organizer,
-        buyerEmail: payment.email,
-        qrCode: crypto.randomBytes(16).toString("hex"),
-        ticketType: payment.ticketType,
-        paymentRef: ref,
-        amountPaid: payment.organizerAmount,
-        currency: "NGN",
-      });
-    });
-
-    /* ================= REDIRECT IMMEDIATELY ================= */
     return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
   } catch (err) {
     console.error("PAYMENT CALLBACK ERROR:", err);
-    return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
+
+    // NEVER FAIL REDIRECT
+    return res.redirect(`${process.env.FRONTEND_URL}/success`);
   }
 };
