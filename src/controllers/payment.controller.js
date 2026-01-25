@@ -139,6 +139,7 @@ export const verifyPayment = async (req, res) => {
       return res.status(404).json({ status: "NOT_FOUND" });
     }
 
+    // Already verified
     if (payment.status === "SUCCESS") {
       return res.json({ status: "SUCCESS" });
     }
@@ -155,32 +156,42 @@ export const verifyPayment = async (req, res) => {
 
     const verifyData = await verifyRes.json();
 
-    if (verifyData?.data?.status !== "SUCCESSFUL") {
+    console.log("ERCASPAY VERIFY:", verifyData);
+
+    const isSuccess =
+      verifyData?.requestSuccessful === true &&
+      verifyData?.responseCode === "success" &&
+      verifyData?.responseBody?.transactionStatus === "SUCCESSFUL";
+
+    if (!isSuccess) {
       return res.json({ status: "PENDING" });
     }
 
-    /* ===== PAYMENT CONFIRMED ===== */
+    // ✅ MARK PAYMENT SUCCESS
     payment.status = "SUCCESS";
     await payment.save();
 
-    const event = await Event.findById(payment.event);
-    const ticketCode = crypto.randomBytes(16).toString("hex");
+    // ✅ CREATE TICKET (ONLY ONCE)
+    const exists = await Ticket.findOne({ paymentRef: reference });
+    if (!exists) {
+      const event = await Event.findById(payment.event);
 
-    await Ticket.create({
-      event: event._id,
-      organizer: event.organizer,
-      buyerEmail: payment.email,
-      qrCode: ticketCode,
-      ticketType: payment.ticketType,
-      paymentRef: reference,
-      amountPaid: payment.amount,
-      currency: "NGN",
-    });
+      await Ticket.create({
+        event: event._id,
+        organizer: event.organizer,
+        buyerEmail: payment.email,
+        qrCode: crypto.randomBytes(16).toString("hex"),
+        ticketType: payment.ticketType,
+        paymentRef: reference,
+        amountPaid: payment.amount,
+        currency: "NGN",
+      });
+    }
 
     return res.json({ status: "SUCCESS" });
   } catch (err) {
-    console.error("VERIFY ERROR:", err);
-    res.status(500).json({ status: "ERROR" });
+    console.error("VERIFY PAYMENT ERROR:", err);
+    return res.status(500).json({ status: "ERROR" });
   }
 };
 
