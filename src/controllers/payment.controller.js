@@ -1,6 +1,3 @@
-import dotenv from "dotenv";
-dotenv.config();
-
 import crypto from "crypto";
 import fetch from "node-fetch";
 import Event from "../models/Event.js";
@@ -12,10 +9,10 @@ import Ticket from "../models/Ticket.js";
 ===================================================== */
 export const initiatePayment = async (req, res) => {
   try {
-    const { eventId, ticketType, email } = req.body;
+    const { eventId, ticketType, email, name } = req.body;
 
-    if (!eventId || !ticketType || !email) {
-      return res.status(400).json({ message: "Invalid request" });
+    if (!eventId || !ticketType || !email || !name) {
+      return res.status(400).json({ message: "Missing required fields" });
     }
 
     const event = await Event.findById(eventId);
@@ -23,13 +20,13 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
-    const ticket = event.ticketTypes.find((t) => t.name === ticketType);
+    const ticket = event.ticketTypes.find(t => t.name === ticketType);
     if (!ticket) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
 
     const amount = Number(ticket.price);
-    const reference = `TICTIFY-${crypto.randomBytes(8).toString("hex")}`;
+    const reference = `TICTIFY-${crypto.randomBytes(10).toString("hex")}`;
 
     /* ================= FREE EVENT ================= */
     if (amount === 0) {
@@ -45,8 +42,8 @@ export const initiatePayment = async (req, res) => {
       });
 
       return res.json({
-        reference,
         paymentUrl: `${process.env.FRONTEND_URL}/payment/success?ref=${reference}`,
+        reference,
       });
     }
 
@@ -62,6 +59,21 @@ export const initiatePayment = async (req, res) => {
       provider: "ERCASPAY",
     });
 
+    const payload = {
+      amount: amount, // ERCASPAY expects NAIRA, not kobo
+      paymentReference: reference,
+      paymentMethods: "card,bank-transfer,ussd,qrcode",
+      customerName: name,
+      customerEmail: email,
+      currency: "NGN",
+      redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
+      metadata: {
+        eventId,
+        ticketType,
+        email,
+      },
+    };
+
     const ercaspayRes = await fetch(
       "https://api.ercaspay.com/api/v1/payment/initiate",
       {
@@ -71,57 +83,38 @@ export const initiatePayment = async (req, res) => {
           "Content-Type": "application/json",
           Accept: "application/json",
         },
-        body: JSON.stringify({
-          amount: amount * 100, // kobo
-          currency: "NGN",
-
-          paymentReference: reference,
-          paymentMethods: "card,bank_transfer,ussd",
-
-          customerEmail: email,
-          customerName: email.split("@")[0], // ✅ REQUIRED
-
-          description: `Ticket for ${event.title}`,
-
-          redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
-          callbackUrl: `${process.env.BACKEND_URL}/api/webhooks/ercaspay`,
-
-          metadata: {
-            eventId,
-            ticketType,
-            email,
-          },
-        }),
-      },
+        body: JSON.stringify(payload),
+      }
     );
 
-    const contentType = ercaspayRes.headers.get("content-type");
     const raw = await ercaspayRes.text();
 
-    if (!contentType?.includes("application/json")) {
-      console.error("ERCASPAY NON-JSON:", raw);
+    let data;
+    try {
+      data = JSON.parse(raw);
+    } catch {
+      console.error("ERCASPAY NON-JSON RESPONSE:", raw);
       return res.status(500).json({ message: "Invalid gateway response" });
     }
 
-    const data = JSON.parse(raw);
-
-    if (!ercaspayRes.ok || !data?.data?.checkout_url) {
+    if (!ercaspayRes.ok || !data?.data?.checkoutUrl) {
       console.error("ERCASPAY ERROR:", data);
-      return res.status(500).json({ message: "Payment gateway error" });
+      return res.status(500).json({ message: "Payment initialization failed" });
     }
 
     return res.json({
+      paymentUrl: data.data.checkoutUrl,
       reference,
-      paymentUrl: data.data.checkout_url, // ✅ CORRECT FIELD
     });
+
   } catch (err) {
     console.error("INIT PAYMENT ERROR:", err);
-    res.status(500).json({ message: "Payment init failed" });
+    res.status(500).json({ message: "Payment initialization failed" });
   }
 };
 
 /* =====================================================
-   VERIFY PAYMENT (ERCASPAY)
+   VERIFY PAYMENT (PROCESSING PAGE)
 ===================================================== */
 export const verifyPayment = async (req, res) => {
   try {
@@ -132,7 +125,6 @@ export const verifyPayment = async (req, res) => {
       return res.status(404).json({ status: "NOT_FOUND" });
     }
 
-    // ✅ Idempotency
     if (payment.status === "SUCCESS") {
       return res.json({ status: "SUCCESS" });
     }
@@ -144,21 +136,20 @@ export const verifyPayment = async (req, res) => {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
           Accept: "application/json",
         },
-      },
+      }
     );
 
     const verifyData = await verifyRes.json();
 
-    if (verifyData?.data?.status !== "SUCCESS") {
+    if (verifyData?.data?.status !== "SUCCESSFUL") {
       return res.json({ status: "PENDING" });
     }
 
-    /* ================= CONFIRM PAYMENT ================= */
+    /* ===== PAYMENT CONFIRMED ===== */
     payment.status = "SUCCESS";
     await payment.save();
 
     const event = await Event.findById(payment.event);
-
     const ticketCode = crypto.randomBytes(16).toString("hex");
 
     await Ticket.create({
@@ -178,6 +169,7 @@ export const verifyPayment = async (req, res) => {
     res.status(500).json({ status: "ERROR" });
   }
 };
+
 
 /* =====================================================
    PAYMENT STATUS (FRONTEND POLLING)
