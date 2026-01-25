@@ -84,7 +84,7 @@ export const initiatePayment = async (req, res) => {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          amount: amount * 100, // kobo
+          amount: amount, // kobo
           paymentReference: reference,
           paymentMethods: "card,bank-transfer,ussd",
           customerName: name,
