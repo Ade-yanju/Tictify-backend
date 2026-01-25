@@ -146,10 +146,12 @@ export const paymentCallback = async (req, res) => {
       return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
     }
 
+    // If already successful, go straight to success page
     if (payment.status === "SUCCESS") {
       return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
     }
 
+    /* ================= VERIFY WITH ERCASPAY ================= */
     const verifyRes = await fetch(
       `https://api.ercaspay.com/api/v1/payment/transaction/verify/${ref}`,
       {
@@ -166,15 +168,20 @@ export const paymentCallback = async (req, res) => {
       data?.requestSuccessful === true &&
       data?.responseBody?.transactionStatus === "SUCCESSFUL";
 
+    // ❌ Only fail if ERCASPAY explicitly says failed
     if (!isSuccess) {
       return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
     }
 
+    /* ================= MARK PAYMENT SUCCESS ================= */
     payment.status = "SUCCESS";
     await payment.save();
 
-    const exists = await Ticket.findOne({ paymentRef: ref });
-    if (!exists) {
+    /* ================= CREATE TICKET (NON-BLOCKING) ================= */
+    // Fire-and-forget style (safe & idempotent)
+    Ticket.findOne({ paymentRef: ref }).then(async (existing) => {
+      if (existing) return;
+
       const event = await Event.findById(payment.event);
 
       await Ticket.create({
@@ -187,8 +194,9 @@ export const paymentCallback = async (req, res) => {
         amountPaid: payment.organizerAmount,
         currency: "NGN",
       });
-    }
+    });
 
+    /* ================= REDIRECT IMMEDIATELY ================= */
     return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
   } catch (err) {
     console.error("PAYMENT CALLBACK ERROR:", err);
