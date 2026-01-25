@@ -20,16 +20,22 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
-    const ticket = event.ticketTypes.find((t) => t.name === ticketType);
-    if (!ticket) {
+    const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
+    if (!ticketConfig) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
 
-    const amount = Number(ticket.price);
+    const ticketPrice = Number(ticketConfig.price);
+    if (isNaN(ticketPrice) || ticketPrice < 0) {
+      return res.status(400).json({ message: "Invalid ticket price" });
+    }
+
     const reference = `TICTIFY-${crypto.randomBytes(10).toString("hex")}`;
 
-    /* ================= FREE EVENT ================= */
-    if (amount === 0) {
+    /* =====================================================
+       FREE EVENT (NO PAYMENT GATEWAY)
+    ===================================================== */
+    if (ticketPrice === 0) {
       await Payment.create({
         reference,
         event: eventId,
@@ -37,42 +43,47 @@ export const initiatePayment = async (req, res) => {
         ticketType,
         email,
         amount: 0,
+        platformFee: 0,
+        organizerAmount: 0,
         status: "SUCCESS",
         provider: "FREE",
       });
 
+      await Ticket.create({
+        event: event._id,
+        organizer: event.organizer,
+        buyerEmail: email,
+        qrCode: crypto.randomBytes(16).toString("hex"),
+        ticketType,
+        paymentRef: reference,
+        amountPaid: 0,
+        currency: "NGN",
+      });
+
       return res.json({
-        paymentUrl: `${process.env.FRONTEND_URL}/payment/success?ref=${reference}`,
         reference,
+        paymentUrl: `${process.env.FRONTEND_URL}/success/${reference}`,
       });
     }
 
-    /* ================= PAID EVENT ================= */
+    /* =====================================================
+       PAID EVENT (GUEST PAYS PLATFORM FEE)
+    ===================================================== */
+    const platformFee = Math.round(ticketPrice * 0.03 + 80);
+    const totalAmount = ticketPrice + platformFee;
+
     await Payment.create({
       reference,
       event: eventId,
       organizer: event.organizer,
       ticketType,
       email,
-      amount,
+      amount: totalAmount, // what guest pays
+      platformFee,
+      organizerAmount: ticketPrice, // what organizer earns
       status: "PENDING",
       provider: "ERCASPAY",
     });
-
-    const payload = {
-      amount: amount, // ERCASPAY expects NAIRA, not kobo
-      paymentReference: reference,
-      paymentMethods: "card,bank-transfer,ussd,qrcode",
-      customerName: name,
-      customerEmail: email,
-      currency: "NGN",
-      redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
-      metadata: {
-        eventId,
-        ticketType,
-        email,
-      },
-    };
 
     const ercaspayRes = await fetch(
       "https://api.ercaspay.com/api/v1/payment/initiate",
@@ -84,13 +95,13 @@ export const initiatePayment = async (req, res) => {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          amount: amount, // kobo
+          amount: totalAmount, // ✅ NAIRA (NOT kobo)
           paymentReference: reference,
-          paymentMethods: "card,bank-transfer,ussd",
+          paymentMethods: "card,bank-transfer,ussd,qrcode",
           customerName: name,
           customerEmail: email,
           currency: "NGN",
-          redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
+          redirectUrl: `${process.env.BACKEND_URL}/api/payments/callback?ref=${reference}`,
           metadata: {
             eventId,
             ticketType,
@@ -102,50 +113,45 @@ export const initiatePayment = async (req, res) => {
 
     const ercaspayData = await ercaspayRes.json();
 
-    /* ✅ HARD VALIDATION */
     if (
-      !ercaspayData ||
-      ercaspayData.requestSuccessful !== true ||
-      !ercaspayData.responseBody?.checkoutUrl
+      ercaspayData?.requestSuccessful !== true ||
+      !ercaspayData?.responseBody?.checkoutUrl
     ) {
-      console.error("ERCASPAY INIT FAILED:", ercaspayData);
       await Payment.updateOne({ reference }, { status: "FAILED" });
-
-      return res.status(500).json({
-        message: "Unable to initialize payment",
-      });
+      return res.status(500).json({ message: "Unable to initialize payment" });
     }
 
-    /* ✅ SUCCESS */
     return res.json({
       reference,
       paymentUrl: ercaspayData.responseBody.checkoutUrl,
     });
   } catch (err) {
-    console.error("INITIATE ERROR:", err);
+    console.error("INITIATE PAYMENT ERROR:", err);
     return res.status(500).json({ message: "Payment initialization failed" });
   }
 };
 
 /* =====================================================
-   VERIFY PAYMENT (PROCESSING PAGE)
+   ERCASPAY CALLBACK (SOURCE OF TRUTH)
 ===================================================== */
-export const verifyPayment = async (req, res) => {
+export const paymentCallback = async (req, res) => {
   try {
-    const { reference } = req.params;
-
-    const payment = await Payment.findOne({ reference });
-    if (!payment) {
-      return res.status(404).json({ status: "NOT_FOUND" });
+    const { ref } = req.query;
+    if (!ref) {
+      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
     }
 
-    // Already verified
+    const payment = await Payment.findOne({ reference: ref });
+    if (!payment) {
+      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
+    }
+
     if (payment.status === "SUCCESS") {
-      return res.json({ status: "SUCCESS" });
+      return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
     }
 
     const verifyRes = await fetch(
-      `https://api.ercaspay.com/api/v1/payment/transaction/verify/${reference}`,
+      `https://api.ercaspay.com/api/v1/payment/transaction/verify/${ref}`,
       {
         headers: {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
@@ -154,25 +160,20 @@ export const verifyPayment = async (req, res) => {
       },
     );
 
-    const verifyData = await verifyRes.json();
-
-    console.log("ERCASPAY VERIFY:", verifyData);
+    const data = await verifyRes.json();
 
     const isSuccess =
-      verifyData?.requestSuccessful === true &&
-      verifyData?.responseCode === "success" &&
-      verifyData?.responseBody?.transactionStatus === "SUCCESSFUL";
+      data?.requestSuccessful === true &&
+      data?.responseBody?.transactionStatus === "SUCCESSFUL";
 
     if (!isSuccess) {
-      return res.json({ status: "PENDING" });
+      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
     }
 
-    // ✅ MARK PAYMENT SUCCESS
     payment.status = "SUCCESS";
     await payment.save();
 
-    // ✅ CREATE TICKET (ONLY ONCE)
-    const exists = await Ticket.findOne({ paymentRef: reference });
+    const exists = await Ticket.findOne({ paymentRef: ref });
     if (!exists) {
       const event = await Event.findById(payment.event);
 
@@ -182,38 +183,15 @@ export const verifyPayment = async (req, res) => {
         buyerEmail: payment.email,
         qrCode: crypto.randomBytes(16).toString("hex"),
         ticketType: payment.ticketType,
-        paymentRef: reference,
-        amountPaid: payment.amount,
+        paymentRef: ref,
+        amountPaid: payment.organizerAmount,
         currency: "NGN",
       });
     }
 
-    return res.json({ status: "SUCCESS" });
+    return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
   } catch (err) {
-    console.error("VERIFY PAYMENT ERROR:", err);
-    return res.status(500).json({ status: "ERROR" });
-  }
-};
-
-/* =====================================================
-   PAYMENT STATUS (FRONTEND POLLING)
-===================================================== */
-export const getPaymentStatus = async (req, res) => {
-  try {
-    const { reference } = req.params;
-
-    if (!reference) {
-      return res.status(400).json({ status: "INVALID_REFERENCE" });
-    }
-
-    const payment = await Payment.findOne({ reference });
-    if (!payment) {
-      return res.status(404).json({ status: "NOT_FOUND" });
-    }
-
-    return res.json({ status: payment.status });
-  } catch (err) {
-    console.error("PAYMENT STATUS ERROR:", err);
-    return res.status(500).json({ status: "ERROR" });
+    console.error("PAYMENT CALLBACK ERROR:", err);
+    return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`);
   }
 };
