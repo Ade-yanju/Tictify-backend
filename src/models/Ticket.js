@@ -1,65 +1,58 @@
 import mongoose from "mongoose";
 
-const paymentSchema = new mongoose.Schema(
+const ticketSchema = new mongoose.Schema(
   {
+    /* ================= EXISTING (UNCHANGED) ================= */
     event: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "Event",
       required: true,
     },
 
+    buyerEmail: {
+      type: String,
+      required: true,
+    },
+
+    qrCode: {
+      type: String,
+      required: true,
+      unique: true,
+    },
+
+    scanned: {
+      type: Boolean,
+      default: false,
+    },
+
+    paymentRef: {
+      type: String,
+      required: true,
+    },
+
+    /* ================= NEW (NON-BREAKING) ================= */
+
     organizer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",
-      required: true,
-      index: true,
+      index: true, // improves sales queries
     },
 
-    email: {
-      type: String,
-      required: true,
-    },
-
-    ticketType: {
-      type: String,
-      required: true,
-    },
-
-    amount: {
+    amountPaid: {
       type: Number,
-      required: true,
       min: 0,
     },
 
-    platformFee: {
-      type: Number,
-      default: 0,
-    },
-
-    organizerAmount: {
-      type: Number,
-      default: 0,
-    },
-
-    reference: {
+    currency: {
       type: String,
-      unique: true,
-      required: true,
+      default: "NGN",
     },
 
-    provider: {
-      type: String,
-      enum: ["MOCK", "ERCASPAY", "PAYSTACK"],
-      default: "MOCK",
-    },
-
-    status: {
-      type: String,
-      enum: ["PENDING", "SUCCESS", "FAILED"],
-      default: "PENDING",
+    ticketType: {
+      type: String, // e.g. Regular, VIP, Early Bird
     },
   },
   { timestamps: true },
 );
 
-export default mongoose.model("Payment", paymentSchema);
+export default mongoose.model("Ticket", ticketSchema);

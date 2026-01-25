@@ -18,6 +18,7 @@ const paymentSchema = new mongoose.Schema(
     email: {
       type: String,
       required: true,
+      index: true,
     },
 
     ticketType: {
@@ -29,6 +30,11 @@ const paymentSchema = new mongoose.Schema(
       type: Number,
       required: true,
       min: 0,
+    },
+
+    currency: {
+      type: String,
+      default: "NGN",
     },
 
     platformFee: {
@@ -45,21 +51,39 @@ const paymentSchema = new mongoose.Schema(
       type: String,
       unique: true,
       required: true,
+      index: true,
     },
 
     provider: {
       type: String,
-      enum: ["MOCK", "ERCASPAY", "PAYSTACK"],
-      default: "MOCK",
+      enum: ["FREE", "ERCASPAY"],
+      default: "ERCASPAY",
+    },
+
+    paymentMethods: {
+      type: [String],
+      default: ["card", "bank_transfer", "ussd"],
     },
 
     status: {
       type: String,
       enum: ["PENDING", "SUCCESS", "FAILED"],
       default: "PENDING",
+      index: true,
+    },
+
+    verifiedAt: {
+      type: Date,
+    },
+
+    gatewayResponse: {
+      type: mongoose.Schema.Types.Mixed,
     },
   },
   { timestamps: true },
 );
 
-export default mongoose.model("Payment", paymentSchema);
+const Payment =
+  mongoose.models.Payment || mongoose.model("Payment", paymentSchema);
+
+export default Payment;
