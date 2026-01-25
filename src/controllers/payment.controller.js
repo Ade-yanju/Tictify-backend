@@ -20,7 +20,7 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
-    const ticket = event.ticketTypes.find(t => t.name === ticketType);
+    const ticket = event.ticketTypes.find((t) => t.name === ticketType);
     if (!ticket) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
@@ -74,52 +74,52 @@ export const initiatePayment = async (req, res) => {
       },
     };
 
-const ercaspayRes = await fetch(
-  "https://api.ercaspay.com/api/v1/payment/initiate",
-  {
-    method: "POST",
-    headers: {
-      Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
-      "Content-Type": "application/json",
-      Accept: "application/json",
-    },
-    body: JSON.stringify({
-      amount: amount * 100, // kobo
-      paymentReference: reference,
-      paymentMethods: "card,bank_transfer,ussd",
-      customerEmail: email,
-      currency: "NGN",
-      redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
-      metadata: {
-        eventId,
-        ticketType,
-        email,
+    const ercaspayRes = await fetch(
+      "https://api.ercaspay.com/api/v1/payment/initiate",
+      {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+          "Content-Type": "application/json",
+          Accept: "application/json",
+        },
+        body: JSON.stringify({
+          amount: amount * 100, // kobo
+          paymentReference: reference,
+          paymentMethods: "card,bank-transfer,ussd",
+          customerEmail: email,
+          currency: "NGN",
+          redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
+          metadata: {
+            eventId,
+            ticketType,
+            email,
+          },
+        }),
       },
-    }),
-  }
-);
+    );
 
-const ercaspayData = await ercaspayRes.json();
+    const ercaspayData = await ercaspayRes.json();
 
-/* ✅ HARD VALIDATION */
-if (
-  !ercaspayData ||
-  ercaspayData.requestSuccessful !== true ||
-  !ercaspayData.responseBody?.checkoutUrl
-) {
-  console.error("ERCASPAY INIT FAILED:", ercaspayData);
-  await Payment.updateOne({ reference }, { status: "FAILED" });
+    /* ✅ HARD VALIDATION */
+    if (
+      !ercaspayData ||
+      ercaspayData.requestSuccessful !== true ||
+      !ercaspayData.responseBody?.checkoutUrl
+    ) {
+      console.error("ERCASPAY INIT FAILED:", ercaspayData);
+      await Payment.updateOne({ reference }, { status: "FAILED" });
 
-  return res.status(500).json({
-    message: "Unable to initialize payment",
-  });
-}
+      return res.status(500).json({
+        message: "Unable to initialize payment",
+      });
+    }
 
-/* ✅ SUCCESS */
-return res.json({
-  reference,
-  paymentUrl: ercaspayData.responseBody.checkoutUrl,
-});
+    /* ✅ SUCCESS */
+    return res.json({
+      reference,
+      paymentUrl: ercaspayData.responseBody.checkoutUrl,
+    });
   } catch (err) {
     console.error("INITIATE ERROR:", err);
     return res.status(500).json({ message: "Payment initialization failed" });
@@ -149,7 +149,7 @@ export const verifyPayment = async (req, res) => {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
           Accept: "application/json",
         },
-      }
+      },
     );
 
     const verifyData = await verifyRes.json();
@@ -182,7 +182,6 @@ export const verifyPayment = async (req, res) => {
     res.status(500).json({ status: "ERROR" });
   }
 };
-
 
 /* =====================================================
    PAYMENT STATUS (FRONTEND POLLING)
