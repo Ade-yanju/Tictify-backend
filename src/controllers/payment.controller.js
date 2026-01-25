@@ -1,11 +1,15 @@
 import dotenv from "dotenv";
 dotenv.config();
+
 import crypto from "crypto";
 import fetch from "node-fetch";
 import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 
+/* =====================================================
+   INITIATE PAYMENT (FREE OR ERCASPAY)
+===================================================== */
 export const initiatePayment = async (req, res) => {
   try {
     const { eventId, ticketType, email } = req.body;
@@ -65,14 +69,23 @@ export const initiatePayment = async (req, res) => {
         headers: {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
           "Content-Type": "application/json",
+          Accept: "application/json",
         },
         body: JSON.stringify({
           amount: amount * 100, // kobo
+          currency: "NGN",
+
           paymentReference: reference,
           paymentMethods: "card,bank_transfer,ussd",
+
           customerEmail: email,
-          currency: "NGN",
+          customerName: email.split("@")[0], // ✅ REQUIRED
+
+          description: `Ticket for ${event.title}`,
+
           redirectUrl: `${process.env.FRONTEND_URL}/payment/processing?ref=${reference}`,
+          callbackUrl: `${process.env.BACKEND_URL}/api/webhooks/ercaspay`,
+
           metadata: {
             eventId,
             ticketType,
@@ -82,16 +95,24 @@ export const initiatePayment = async (req, res) => {
       },
     );
 
-    const data = await ercaspayRes.json();
+    const contentType = ercaspayRes.headers.get("content-type");
+    const raw = await ercaspayRes.text();
 
-    if (!ercaspayRes.ok || !data?.data?.checkoutUrl) {
+    if (!contentType?.includes("application/json")) {
+      console.error("ERCASPAY NON-JSON:", raw);
+      return res.status(500).json({ message: "Invalid gateway response" });
+    }
+
+    const data = JSON.parse(raw);
+
+    if (!ercaspayRes.ok || !data?.data?.checkout_url) {
       console.error("ERCASPAY ERROR:", data);
       return res.status(500).json({ message: "Payment gateway error" });
     }
 
     return res.json({
       reference,
-      paymentUrl: data.data.checkoutUrl,
+      paymentUrl: data.data.checkout_url, // ✅ CORRECT FIELD
     });
   } catch (err) {
     console.error("INIT PAYMENT ERROR:", err);
@@ -99,15 +120,19 @@ export const initiatePayment = async (req, res) => {
   }
 };
 
+/* =====================================================
+   VERIFY PAYMENT (ERCASPAY)
+===================================================== */
 export const verifyPayment = async (req, res) => {
   try {
     const { reference } = req.params;
 
     const payment = await Payment.findOne({ reference });
     if (!payment) {
-      return res.status(404).json({ message: "Payment not found" });
+      return res.status(404).json({ status: "NOT_FOUND" });
     }
 
+    // ✅ Idempotency
     if (payment.status === "SUCCESS") {
       return res.json({ status: "SUCCESS" });
     }
@@ -117,17 +142,18 @@ export const verifyPayment = async (req, res) => {
       {
         headers: {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+          Accept: "application/json",
         },
       },
     );
 
     const verifyData = await verifyRes.json();
 
-    if (verifyData?.data?.status !== "SUCCESSFUL") {
+    if (verifyData?.data?.status !== "SUCCESS") {
       return res.json({ status: "PENDING" });
     }
 
-    /* ================= PAYMENT CONFIRMED ================= */
+    /* ================= CONFIRM PAYMENT ================= */
     payment.status = "SUCCESS";
     await payment.save();
 
@@ -152,6 +178,10 @@ export const verifyPayment = async (req, res) => {
     res.status(500).json({ status: "ERROR" });
   }
 };
+
+/* =====================================================
+   PAYMENT STATUS (FRONTEND POLLING)
+===================================================== */
 export const getPaymentStatus = async (req, res) => {
   try {
     const { reference } = req.params;
@@ -161,14 +191,11 @@ export const getPaymentStatus = async (req, res) => {
     }
 
     const payment = await Payment.findOne({ reference });
-
     if (!payment) {
       return res.status(404).json({ status: "NOT_FOUND" });
     }
 
-    return res.json({
-      status: payment.status, // PENDING | SUCCESS | FAILED
-    });
+    return res.json({ status: payment.status });
   } catch (err) {
     console.error("PAYMENT STATUS ERROR:", err);
     return res.status(500).json({ status: "ERROR" });
