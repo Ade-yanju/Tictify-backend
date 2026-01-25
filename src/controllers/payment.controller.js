@@ -59,7 +59,7 @@ export const initiatePayment = async (req, res) => {
     });
 
     const ercaspayRes = await fetch(
-      "https://api.ercaspay.com/payment/initiate",
+      "https://api.ercaspay.com/api/v1/payment/initiate",
       {
         method: "POST",
         headers: {
@@ -113,7 +113,7 @@ export const verifyPayment = async (req, res) => {
     }
 
     const verifyRes = await fetch(
-      `https://api.ercaspay.com/payment/transaction/verify/${reference}`,
+      `https://api.ercaspay.com/api/v1/payment/transaction/verify/${reference}`,
       {
         headers: {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
