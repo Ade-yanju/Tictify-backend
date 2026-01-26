@@ -1,14 +1,14 @@
 import express from "express";
 import {
   initiatePayment,
-  //getPaymentStatus,
+  verifyPayment,
   paymentCallback,
 } from "../controllers/payment.controller.js";
 
 const router = express.Router();
 
 router.post("/initiate", initiatePayment);
-//router.get("/status/:reference", getPaymentStatus);
+router.post("/verify", verifyPayment);
 router.get("/callback", paymentCallback);
 
 export default router;

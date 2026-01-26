@@ -159,3 +159,78 @@ export const paymentCallback = async (req, res) => {
     return res.redirect(`${process.env.FRONTEND_URL}/success`);
   }
 };
+export const verifyPayment = async (req, res) => {
+  try {
+    const { reference } = req.body;
+
+    if (!reference) {
+      return res.status(400).json({ message: "Reference required" });
+    }
+
+    const payment = await Payment.findOne({ reference });
+
+    if (!payment) {
+      return res.status(404).json({ message: "Payment not found" });
+    }
+
+    // ✅ Already processed (VERY IMPORTANT)
+    if (payment.status === "SUCCESS") {
+      const ticket = await Ticket.findOne({ paymentRef: reference });
+      return res.json({ success: true, ticket });
+    }
+
+    /* ============================
+       VERIFY WITH ERCASPAY
+    ============================ */
+    const ercasRes = await fetch(
+      `https://api.ercaspay.com/api/v1/payment/verify/${reference}`,
+      {
+        headers: {
+          Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+          Accept: "application/json",
+        },
+      }
+    );
+
+    const ercasData = await ercasRes.json();
+
+    if (
+      ercasData?.responseBody?.paymentStatus !== "SUCCESSFUL"
+    ) {
+      return res.json({ success: false, status: "PENDING" });
+    }
+
+    /* ============================
+       UPDATE PAYMENT
+    ============================ */
+    payment.status = "SUCCESS";
+    await payment.save();
+
+    /* ============================
+       IDEMPOTENT TICKET CREATION
+    ============================ */
+    const existingTicket = await Ticket.findOne({
+      paymentRef: reference,
+    });
+
+    if (existingTicket) {
+      return res.json({ success: true, ticket: existingTicket });
+    }
+
+    const ticket = await Ticket.create({
+      event: payment.event,
+      organizer: payment.organizer,
+      buyerEmail: payment.email,
+      qrCode: crypto.randomBytes(16).toString("hex"),
+      ticketType: payment.ticketType,
+      paymentRef: reference,
+      amountPaid: payment.amount,
+      currency: "NGN",
+    });
+
+    return res.json({ success: true, ticket });
+  } catch (err) {
+    console.error("VERIFY PAYMENT ERROR:", err);
+    return res.status(500).json({ message: "Verification failed" });
+  }
+};
