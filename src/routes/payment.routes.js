@@ -8,7 +8,7 @@ import {
 const router = express.Router();
 
 router.post("/initiate", initiatePayment);
-router.post("/verify", verifyPayment);
+router.post("/payments/verify", verifyPayment);
 router.get("/callback", paymentCallback);
 
 export default router;
