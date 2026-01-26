@@ -30,6 +30,10 @@ const ticketSchema = new mongoose.Schema(
       required: true,
     },
 
+    qrImage: {
+      type: String,
+    },
+
     /* ================= NEW (NON-BREAKING) ================= */
 
     organizer: {

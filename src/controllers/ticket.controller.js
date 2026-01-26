@@ -11,20 +11,28 @@ export const getTicketByReference = async (req, res) => {
     const { reference } = req.params;
 
     if (!reference) {
-      return res.status(400).json({ message: "Reference is required" });
+      return res
+        .status(400)
+        .json({ status: "ERROR", message: "Missing reference" });
     }
 
     const ticket = await Ticket.findOne({ paymentRef: reference }).populate(
       "event",
     );
 
-    if (!ticket || !ticket.event) {
-      return res.status(404).json({ message: "Ticket not found" });
+    // ⏳ Ticket not created yet → NOT an error
+    if (!ticket) {
+      return res.json({ status: "PENDING" });
     }
 
-    const qrImage = await QRCode.toDataURL(ticket.qrCode);
+    // ⚡ Generate QR ONCE
+    if (!ticket.qrImage) {
+      ticket.qrImage = await QRCode.toDataURL(ticket.qrCode);
+      await ticket.save();
+    }
 
     return res.json({
+      status: "READY",
       event: {
         title: ticket.event.title,
         date: ticket.event.date,
@@ -32,12 +40,12 @@ export const getTicketByReference = async (req, res) => {
       },
       ticket: {
         ticketType: ticket.ticketType,
-        qrImage,
+        qrImage: ticket.qrImage,
       },
     });
   } catch (error) {
     console.error("GET TICKET ERROR:", error);
-    return res.status(500).json({ message: "Failed to load ticket" });
+    return res.status(500).json({ status: "ERROR" });
   }
 };
 
@@ -195,14 +203,16 @@ export const createFreeTicket = async (req, res) => {
     const qrImage = await generateQRCode(ticketCode);
 
     await Ticket.create({
-      event: eventId,
+      event: event._id,
       organizer: event.organizer,
-      buyerEmail: email,
-      qrCode: ticketCode,
-      scanned: false,
-      ticketType,
-      amountPaid: 0,
+      buyerEmail: payment.email,
+      qrCode: crypto.randomBytes(16).toString("hex"),
+      qrImage: null, // generated lazily
+      ticketType: payment.ticketType,
+      paymentRef: ref,
+      amountPaid: payment.organizerAmount,
       currency: "NGN",
+      scanned: false,
     });
 
     return res.json({ success: true });
