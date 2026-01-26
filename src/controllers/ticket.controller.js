@@ -7,46 +7,31 @@ import QRCode from "qrcode";
    GET TICKET BY PAYMENT REFERENCE (SUCCESS PAGE)
 ===================================================== */
 export const getTicketByReference = async (req, res) => {
-  try {
-    const { reference } = req.params;
+  const { reference } = req.params;
 
-    if (!reference) {
-      return res
-        .status(400)
-        .json({ status: "ERROR", message: "Missing reference" });
-    }
+  const ticket = await Ticket.findOne({ paymentRef: reference }).populate(
+    "event",
+  );
 
-    const ticket = await Ticket.findOne({ paymentRef: reference }).populate(
-      "event",
-    );
-
-    // ⏳ Ticket not created yet → NOT an error
-    if (!ticket) {
-      return res.json({ status: "PENDING" });
-    }
-
-    // ⚡ Generate QR ONCE
-    if (!ticket.qrImage) {
-      ticket.qrImage = await QRCode.toDataURL(ticket.qrCode);
-      await ticket.save();
-    }
-
-    return res.json({
-      status: "READY",
-      event: {
-        title: ticket.event.title,
-        date: ticket.event.date,
-        location: ticket.event.location,
-      },
-      ticket: {
-        ticketType: ticket.ticketType,
-        qrImage: ticket.qrImage,
-      },
-    });
-  } catch (error) {
-    console.error("GET TICKET ERROR:", error);
-    return res.status(500).json({ status: "ERROR" });
+  // 👇 THIS IS THE FIX
+  if (!ticket) {
+    return res.json({ status: "PENDING" });
   }
+
+  const qrImage = await QRCode.toDataURL(ticket.qrCode);
+
+  return res.json({
+    status: "READY",
+    event: {
+      title: ticket.event.title,
+      date: ticket.event.date,
+      location: ticket.event.location,
+    },
+    ticket: {
+      ticketType: ticket.ticketType,
+      qrImage,
+    },
+  });
 };
 
 /* =====================================================
