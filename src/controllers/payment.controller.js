@@ -236,3 +236,115 @@ export const verifyPayment = async (req, res) => {
     return res.status(500).json({ message: "Verification failed" });
   }
 };
+export const getTicketByReference = async (req, res) => {
+  const { reference } = req.params;
+
+  // 1️⃣ Check if ticket already exists
+  let ticket = await Ticket.findOne({ paymentRef: reference }).populate("event");
+
+  if (ticket) {
+    const qrImage = await QRCode.toDataURL(ticket.qrCode);
+    return res.json({
+      status: "READY",
+      event: {
+        title: ticket.event.title,
+        date: ticket.event.date,
+        location: ticket.event.location,
+      },
+      ticket: {
+        ticketType: ticket.ticketType,
+        qrImage,
+      },
+    });
+  }
+
+  // 2️⃣ Find payment
+  const payment = await Payment.findOne({ reference });
+
+  if (!payment) {
+    return res.json({ status: "PENDING" });
+  }
+
+  // 3️⃣ If payment already marked success but ticket missing (edge case)
+  if (payment.status === "SUCCESS") {
+    ticket = await Ticket.create({
+      event: payment.event,
+      organizer: payment.organizer,
+      buyerEmail: payment.email,
+      qrCode: crypto.randomBytes(16).toString("hex"),
+      ticketType: payment.ticketType,
+      paymentRef: reference,
+      amountPaid: payment.organizerAmount,
+      currency: "NGN",
+      scanned: false,
+    });
+
+    const qrImage = await QRCode.toDataURL(ticket.qrCode);
+    return res.json({
+      status: "READY",
+      event: {
+        title: ticket.event.title,
+        date: ticket.event.date,
+        location: ticket.event.location,
+      },
+      ticket: {
+        ticketType: ticket.ticketType,
+        qrImage,
+      },
+    });
+  }
+
+  // 4️⃣ VERIFY WITH ERCASPAY
+  const ercasRes = await fetch(
+    `https://api.ercaspay.com/api/v1/payment/verify/${reference}`,
+    {
+      headers: {
+        Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+        Accept: "application/json",
+      },
+    }
+  );
+
+  const ercasData = await ercasRes.json();
+
+  const status =
+    ercasData?.responseBody?.status ||
+    ercasData?.responseBody?.paymentStatus ||
+    ercasData?.responseBody?.transactionStatus;
+
+  if (ercasData?.requestSuccessful !== true || status !== "SUCCESS") {
+    return res.json({ status: "PENDING" });
+  }
+
+  // 5️⃣ Mark payment success
+  payment.status = "SUCCESS";
+  await payment.save();
+
+  // 6️⃣ Create ticket
+  ticket = await Ticket.create({
+    event: payment.event,
+    organizer: payment.organizer,
+    buyerEmail: payment.email,
+    qrCode: crypto.randomBytes(16).toString("hex"),
+    ticketType: payment.ticketType,
+    paymentRef: reference,
+    amountPaid: payment.organizerAmount,
+    currency: "NGN",
+    scanned: false,
+  });
+
+  const qrImage = await QRCode.toDataURL(ticket.qrCode);
+
+  return res.json({
+    status: "READY",
+    event: {
+      title: ticket.event.title,
+      date: ticket.event.date,
+      location: ticket.event.location,
+    },
+    ticket: {
+      ticketType: ticket.ticketType,
+      qrImage,
+    },
+  });
+};
