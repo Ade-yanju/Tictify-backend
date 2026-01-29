@@ -1,5 +1,6 @@
 import crypto from "crypto";
 import fetch from "node-fetch";
+import QRCode from "qrcode";
 import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
@@ -20,7 +21,9 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
-    const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
+    const ticketConfig = event.ticketTypes.find(
+      (t) => t.name === ticketType
+    );
     if (!ticketConfig) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
@@ -30,10 +33,12 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Invalid ticket price" });
     }
 
-    const reference = `TICTIFY-${crypto.randomBytes(10).toString("hex")}`;
+    const reference = `TICTIFY-${crypto
+      .randomBytes(10)
+      .toString("hex")}`;
 
     /* =====================================================
-       FREE EVENT (NO PAYMENT GATEWAY)
+       FREE EVENT
     ===================================================== */
     if (ticketPrice === 0) {
       await Payment.create({
@@ -79,9 +84,9 @@ export const initiatePayment = async (req, res) => {
       organizer: event.organizer,
       ticketType,
       email,
-      amount: totalAmount, // user pays this
+      amount: totalAmount,
       platformFee,
-      organizerAmount: ticketPrice, // organizer earns this
+      organizerAmount: ticketPrice,
       status: "PENDING",
       provider: "ERCASPAY",
     });
@@ -96,7 +101,7 @@ export const initiatePayment = async (req, res) => {
           Accept: "application/json",
         },
         body: JSON.stringify({
-          amount: totalAmount, // NAIRA
+          amount: totalAmount,
           paymentReference: reference,
           paymentMethods: "card,bank-transfer,ussd,qrcode",
           customerName: name,
@@ -109,7 +114,7 @@ export const initiatePayment = async (req, res) => {
             email,
           },
         }),
-      },
+      }
     );
 
     const ercaspayData = await ercaspayRes.json();
@@ -118,8 +123,13 @@ export const initiatePayment = async (req, res) => {
       ercaspayData?.requestSuccessful !== true ||
       !ercaspayData?.responseBody?.checkoutUrl
     ) {
-      await Payment.updateOne({ reference }, { status: "FAILED" });
-      return res.status(500).json({ message: "Unable to initialize payment" });
+      await Payment.updateOne(
+        { reference },
+        { status: "FAILED" }
+      );
+      return res
+        .status(500)
+        .json({ message: "Unable to initialize payment" });
     }
 
     return res.json({
@@ -128,7 +138,9 @@ export const initiatePayment = async (req, res) => {
     });
   } catch (err) {
     console.error("INITIATE PAYMENT ERROR:", err);
-    return res.status(500).json({ message: "Payment initialization failed" });
+    return res
+      .status(500)
+      .json({ message: "Payment initialization failed" });
   }
 };
 
@@ -138,15 +150,17 @@ export const initiatePayment = async (req, res) => {
 export const paymentCallback = async (req, res) => {
   try {
     const ref =
-      req.query.ref || req.query.reference || req.query.paymentReference;
+      req.query.ref ||
+      req.query.reference ||
+      req.query.paymentReference;
 
     if (!ref) {
       return res.redirect(`${process.env.FRONTEND_URL}/success`);
     }
 
-    // ❗ No verification here
-    // ❗ No DB writes here
-    return res.redirect(`${process.env.FRONTEND_URL}/success/${ref}`);
+    return res.redirect(
+      `${process.env.FRONTEND_URL}/success/${ref}`
+    );
   } catch (err) {
     console.error("PAYMENT CALLBACK ERROR:", err);
     return res.redirect(`${process.env.FRONTEND_URL}/success`);
@@ -154,7 +168,7 @@ export const paymentCallback = async (req, res) => {
 };
 
 /* =====================================================
-   VERIFY PAYMENT + ISSUE TICKET (SOURCE OF TRUTH)
+   VERIFY PAYMENT (MATCHES ERCASPAY DOCS)
 ===================================================== */
 export const verifyPayment = async (req, res) => {
   try {
@@ -169,7 +183,7 @@ export const verifyPayment = async (req, res) => {
       return res.status(404).json({ message: "Payment not found" });
     }
 
-    // ✅ Already verified
+    // Already verified
     if (payment.status === "SUCCESS") {
       const ticket = await Ticket.findOne({
         paymentRef: reference,
@@ -178,28 +192,31 @@ export const verifyPayment = async (req, res) => {
     }
 
     /* ===============================
-       VERIFY WITH ERCASPAY
+       VERIFY TRANSACTION (DOC-CORRECT)
     =============================== */
     const ercasRes = await fetch(
-      `https://api.ercaspay.com/api/v1/payment/verify/${reference}`,
+      `https://api.ercaspay.com/api/v1/payment/transaction/verify/${reference}`,
       {
+        method: "GET",
         headers: {
           Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
           Accept: "application/json",
+          "Content-Type": "application/json",
         },
-      },
+      }
     );
 
     const ercasData = await ercasRes.json();
 
-    console.log("ERCASPAY VERIFY RESPONSE:", ercasData);
+    console.log(
+      "ERCASPAY VERIFY RESPONSE:",
+      JSON.stringify(ercasData, null, 2)
+    );
 
-    const status =
-      ercasData?.responseBody?.status ||
-      ercasData?.responseBody?.paymentStatus ||
-      ercasData?.responseBody?.transactionStatus;
-
-    if (ercasData?.requestSuccessful !== true || status !== "SUCCESS") {
+    if (
+      ercasData?.requestSuccessful !== true ||
+      ercasData?.responseBody?.status !== "SUCCESSFUL"
+    ) {
       return res.json({ success: false, status: "PENDING" });
     }
 
@@ -224,7 +241,7 @@ export const verifyPayment = async (req, res) => {
         qrCode: crypto.randomBytes(16).toString("hex"),
         ticketType: payment.ticketType,
         paymentRef: reference,
-        amountPaid: payment.organizerAmount, // ✅ correct revenue
+        amountPaid: payment.organizerAmount,
         currency: "NGN",
         scanned: false,
       });
@@ -233,53 +250,29 @@ export const verifyPayment = async (req, res) => {
     return res.json({ success: true, ticket });
   } catch (err) {
     console.error("VERIFY PAYMENT ERROR:", err);
-    return res.status(500).json({ message: "Verification failed" });
+    return res
+      .status(500)
+      .json({ message: "Verification failed" });
   }
 };
+
+/* =====================================================
+   GET TICKET BY REFERENCE (READ ONLY)
+===================================================== */
 export const getTicketByReference = async (req, res) => {
-  const { reference } = req.params;
+  try {
+    const { reference } = req.params;
 
-  // 1️⃣ Check if ticket already exists
-  let ticket = await Ticket.findOne({ paymentRef: reference }).populate("event");
-
-  if (ticket) {
-    const qrImage = await QRCode.toDataURL(ticket.qrCode);
-    return res.json({
-      status: "READY",
-      event: {
-        title: ticket.event.title,
-        date: ticket.event.date,
-        location: ticket.event.location,
-      },
-      ticket: {
-        ticketType: ticket.ticketType,
-        qrImage,
-      },
-    });
-  }
-
-  // 2️⃣ Find payment
-  const payment = await Payment.findOne({ reference });
-
-  if (!payment) {
-    return res.json({ status: "PENDING" });
-  }
-
-  // 3️⃣ If payment already marked success but ticket missing (edge case)
-  if (payment.status === "SUCCESS") {
-    ticket = await Ticket.create({
-      event: payment.event,
-      organizer: payment.organizer,
-      buyerEmail: payment.email,
-      qrCode: crypto.randomBytes(16).toString("hex"),
-      ticketType: payment.ticketType,
+    const ticket = await Ticket.findOne({
       paymentRef: reference,
-      amountPaid: payment.organizerAmount,
-      currency: "NGN",
-      scanned: false,
-    });
+    }).populate("event");
+
+    if (!ticket) {
+      return res.json({ status: "PENDING" });
+    }
 
     const qrImage = await QRCode.toDataURL(ticket.qrCode);
+
     return res.json({
       status: "READY",
       event: {
@@ -292,59 +285,8 @@ export const getTicketByReference = async (req, res) => {
         qrImage,
       },
     });
+  } catch (err) {
+    console.error("GET TICKET ERROR:", err);
+    return res.status(500).json({ status: "ERROR" });
   }
-
-  // 4️⃣ VERIFY WITH ERCASPAY
-  const ercasRes = await fetch(
-    `https://api.ercaspay.com/api/v1/payment/verify/${reference}`,
-    {
-      headers: {
-        Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
-        Accept: "application/json",
-      },
-    }
-  );
-
-  const ercasData = await ercasRes.json();
-
-  const status =
-    ercasData?.responseBody?.status ||
-    ercasData?.responseBody?.paymentStatus ||
-    ercasData?.responseBody?.transactionStatus;
-
-  if (ercasData?.requestSuccessful !== true || status !== "SUCCESS") {
-    return res.json({ status: "PENDING" });
-  }
-
-  // 5️⃣ Mark payment success
-  payment.status = "SUCCESS";
-  await payment.save();
-
-  // 6️⃣ Create ticket
-  ticket = await Ticket.create({
-    event: payment.event,
-    organizer: payment.organizer,
-    buyerEmail: payment.email,
-    qrCode: crypto.randomBytes(16).toString("hex"),
-    ticketType: payment.ticketType,
-    paymentRef: reference,
-    amountPaid: payment.organizerAmount,
-    currency: "NGN",
-    scanned: false,
-  });
-
-  const qrImage = await QRCode.toDataURL(ticket.qrCode);
-
-  return res.json({
-    status: "READY",
-    event: {
-      title: ticket.event.title,
-      date: ticket.event.date,
-      location: ticket.event.location,
-    },
-    ticket: {
-      ticketType: ticket.ticketType,
-      qrImage,
-    },
-  });
 };
