@@ -28,6 +28,8 @@ const ticketSchema = new mongoose.Schema(
     paymentRef: {
       type: String,
       required: true,
+      unique: true, // ✅ REQUIRED
+      index: true,
     },
 
     qrImage: {

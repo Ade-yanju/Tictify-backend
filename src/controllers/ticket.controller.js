@@ -1,41 +1,47 @@
-import Ticket from "../models/Ticket.js";
-import Event from "../models/Event.js";
+import crypto from "crypto";
 import mongoose from "mongoose";
 import QRCode from "qrcode";
+import Ticket from "../models/Ticket.js";
+import Event from "../models/Event.js";
 
 /* =====================================================
    GET TICKET BY PAYMENT REFERENCE (SUCCESS PAGE)
+   ✅ NO RUNTIME QR GENERATION
+   ✅ READ-ONLY
 ===================================================== */
 export const getTicketByReference = async (req, res) => {
-  const { reference } = req.params;
+  try {
+    const { reference } = req.params;
 
-  const ticket = await Ticket.findOne({ paymentRef: reference }).populate(
-    "event",
-  );
+    const ticket = await Ticket.findOne({
+      paymentRef: reference,
+    }).populate("event");
 
-  // 👇 THIS IS THE FIX
-  if (!ticket) {
-    return res.json({ status: "PENDING" });
+    if (!ticket) {
+      return res.json({ status: "PENDING" });
+    }
+
+    return res.json({
+      status: "READY",
+      event: {
+        title: ticket.event.title,
+        date: ticket.event.date,
+        location: ticket.event.location,
+      },
+      ticket: {
+        ticketType: ticket.ticketType,
+        qrImage: ticket.qrImage, // ✅ already stored
+      },
+    });
+  } catch (err) {
+    console.error("GET TICKET ERROR:", err);
+    return res.status(500).json({ status: "ERROR" });
   }
-
-  const qrImage = await QRCode.toDataURL(ticket.qrCode);
-
-  return res.json({
-    status: "READY",
-    event: {
-      title: ticket.event.title,
-      date: ticket.event.date,
-      location: ticket.event.location,
-    },
-    ticket: {
-      ticketType: ticket.ticketType,
-      qrImage,
-    },
-  });
 };
 
 /* =====================================================
    ORGANIZER TICKET SALES & ANALYTICS
+   (UNCHANGED – ALREADY CORRECT)
 ===================================================== */
 export const getOrganizerTicketSales = async (req, res) => {
   try {
@@ -113,6 +119,7 @@ export const getOrganizerTicketSales = async (req, res) => {
 
 /* =====================================================
    SCAN TICKET (ORGANIZER ONLY)
+   (UNCHANGED – SAFE)
 ===================================================== */
 export const scanTicketController = async (req, res) => {
   try {
@@ -123,7 +130,6 @@ export const scanTicketController = async (req, res) => {
       return res.status(400).json({ message: "Invalid scan data" });
     }
 
-    /* 1️⃣ VERIFY EVENT OWNERSHIP */
     const event = await Event.findOne({
       _id: eventId,
       organizer: organizerId,
@@ -136,7 +142,6 @@ export const scanTicketController = async (req, res) => {
       });
     }
 
-    /* 2️⃣ FIND TICKET */
     const ticket = await Ticket.findOne({
       qrCode: code,
       event: eventId,
@@ -146,12 +151,10 @@ export const scanTicketController = async (req, res) => {
       return res.status(404).json({ message: "Invalid ticket" });
     }
 
-    /* 3️⃣ ALREADY USED */
     if (ticket.scanned) {
       return res.status(409).json({ message: "Ticket already used" });
     }
 
-    /* 4️⃣ MARK AS SCANNED */
     ticket.scanned = true;
     ticket.scannedAt = new Date();
     await ticket.save();
@@ -167,6 +170,11 @@ export const scanTicketController = async (req, res) => {
   }
 };
 
+/* =====================================================
+   CREATE FREE TICKET
+   ✅ FIXED (was broken)
+   ✅ STORES QR IMAGE AT CREATION
+===================================================== */
 export const createFreeTicket = async (req, res) => {
   try {
     const { eventId, email, ticketType } = req.body;
@@ -184,24 +192,27 @@ export const createFreeTicket = async (req, res) => {
       return res.status(400).json({ message: "Invalid free ticket" });
     }
 
-    const ticketCode = crypto.randomBytes(16).toString("hex");
-    const qrImage = await generateQRCode(ticketCode);
+    const paymentRef = `FREE-${crypto.randomBytes(8).toString("hex")}`;
+
+    const qrCode = crypto.randomBytes(16).toString("hex");
+    const qrImage = await QRCode.toDataURL(qrCode);
 
     await Ticket.create({
       event: event._id,
       organizer: event.organizer,
-      buyerEmail: payment.email,
-      qrCode: crypto.randomBytes(16).toString("hex"),
-      qrImage: null, // generated lazily
-      ticketType: payment.ticketType,
-      paymentRef: ref,
-      amountPaid: payment.organizerAmount,
+      buyerEmail: email,
+      qrCode,
+      qrImage,
+      ticketType,
+      paymentRef,
+      amountPaid: 0,
       currency: "NGN",
       scanned: false,
     });
 
     return res.json({ success: true });
   } catch (err) {
+    console.error("FREE TICKET ERROR:", err);
     return res.status(500).json({ message: "Failed to create free ticket" });
   }
 };
