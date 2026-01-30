@@ -6,18 +6,29 @@ import Event from "../models/Event.js";
 
 /* =====================================================
    GET TICKET BY PAYMENT REFERENCE (SUCCESS PAGE)
-   ✅ NO RUNTIME QR GENERATION
-   ✅ READ-ONLY
+   🔒 READ ONLY
+   🔒 NO QR GENERATION HERE
 ===================================================== */
 export const getTicketByReference = async (req, res) => {
   try {
     const { reference } = req.params;
 
+    if (!reference) {
+      return res.json({ status: "PENDING" });
+    }
+
     const ticket = await Ticket.findOne({
       paymentRef: reference,
     }).populate("event");
 
+    // Ticket not yet created
     if (!ticket) {
+      return res.json({ status: "PENDING" });
+    }
+
+    // Ticket exists but QR missing → treat as pending (VERY IMPORTANT)
+    if (!ticket.qrImage) {
+      console.error("⚠️ Ticket missing QR image:", ticket._id);
       return res.json({ status: "PENDING" });
     }
 
@@ -30,7 +41,7 @@ export const getTicketByReference = async (req, res) => {
       },
       ticket: {
         ticketType: ticket.ticketType,
-        qrImage: ticket.qrImage, // ✅ already stored
+        qrImage: ticket.qrImage,
       },
     });
   } catch (err) {
@@ -41,7 +52,8 @@ export const getTicketByReference = async (req, res) => {
 
 /* =====================================================
    ORGANIZER TICKET SALES & ANALYTICS
-   (UNCHANGED – ALREADY CORRECT)
+   ✅ SAFE
+   ✅ NO CHANGES NEEDED
 ===================================================== */
 export const getOrganizerTicketSales = async (req, res) => {
   try {
@@ -119,7 +131,7 @@ export const getOrganizerTicketSales = async (req, res) => {
 
 /* =====================================================
    SCAN TICKET (ORGANIZER ONLY)
-   (UNCHANGED – SAFE)
+   🔒 SAFE
 ===================================================== */
 export const scanTicketController = async (req, res) => {
   try {
@@ -172,8 +184,7 @@ export const scanTicketController = async (req, res) => {
 
 /* =====================================================
    CREATE FREE TICKET
-   ✅ FIXED (was broken)
-   ✅ STORES QR IMAGE AT CREATION
+   🔒 STORES QR IMAGE AT CREATION
 ===================================================== */
 export const createFreeTicket = async (req, res) => {
   try {

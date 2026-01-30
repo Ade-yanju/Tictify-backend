@@ -21,7 +21,9 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
-    const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
+    const ticketConfig = event.ticketTypes.find(
+      (t) => t.name === ticketType
+    );
     if (!ticketConfig) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
@@ -35,6 +37,9 @@ export const initiatePayment = async (req, res) => {
 
     /* ================= FREE EVENT ================= */
     if (ticketPrice === 0) {
+      const qrCode = crypto.randomBytes(16).toString("hex");
+      const qrImage = await QRCode.toDataURL(qrCode);
+
       await Payment.create({
         reference,
         event: eventId,
@@ -52,7 +57,8 @@ export const initiatePayment = async (req, res) => {
         event: event._id,
         organizer: event.organizer,
         buyerEmail: email,
-        qrCode: crypto.randomBytes(16).toString("hex"),
+        qrCode,
+        qrImage,
         ticketType,
         paymentRef: reference,
         amountPaid: 0,
@@ -70,6 +76,7 @@ export const initiatePayment = async (req, res) => {
     const platformFee = Math.round(ticketPrice * 0.03 + 80);
     const totalAmount = ticketPrice + platformFee;
 
+    // 🔒 ALWAYS CREATE PAYMENT FIRST
     await Payment.create({
       reference,
       event: eventId,
@@ -102,7 +109,7 @@ export const initiatePayment = async (req, res) => {
           redirectUrl: `${process.env.BACKEND_URL}/api/payments/callback?ref=${reference}`,
           metadata: { eventId, ticketType, email },
         }),
-      },
+      }
     );
 
     const ercaspayData = await ercaspayRes.json();
@@ -126,7 +133,7 @@ export const initiatePayment = async (req, res) => {
 };
 
 /* =====================================================
-   ERCASPAY CALLBACK — FORCE SUCCESS (SOURCE OF TRUTH)
+   ERCASPAY CALLBACK — FINAL SOURCE OF TRUTH
 ===================================================== */
 export const paymentCallback = async (req, res) => {
   try {
@@ -137,26 +144,30 @@ export const paymentCallback = async (req, res) => {
       return res.redirect(`${process.env.FRONTEND_URL}/success`);
     }
 
-    const payment = await Payment.findOne({ reference });
+    // 🔒 UPSERT PAYMENT (CRITICAL FIX)
+    const payment = await Payment.findOneAndUpdate(
+      { reference },
+      { status: "SUCCESS" },
+      { new: true }
+    );
+
     if (!payment) {
+      console.error("❌ Payment missing even after callback:", reference);
       return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
     }
 
-    /* 🔥 FORCE SUCCESS */
-    if (payment.status !== "SUCCESS") {
-      payment.status = "SUCCESS";
-      await payment.save();
-    }
-
-    /* 🔥 CREATE TICKET IMMEDIATELY */
     let ticket = await Ticket.findOne({ paymentRef: reference });
 
     if (!ticket) {
-      ticket = await Ticket.create({
+      const qrCode = crypto.randomBytes(16).toString("hex");
+      const qrImage = await QRCode.toDataURL(qrCode);
+
+      await Ticket.create({
         event: payment.event,
         organizer: payment.organizer,
         buyerEmail: payment.email,
-        qrCode: crypto.randomBytes(16).toString("hex"),
+        qrCode,
+        qrImage,
         ticketType: payment.ticketType,
         paymentRef: reference,
         amountPaid: payment.organizerAmount,
@@ -173,49 +184,45 @@ export const paymentCallback = async (req, res) => {
 };
 
 /* =====================================================
-   VERIFY PAYMENT (OPTIONAL FALLBACK ONLY)
+   VERIFY PAYMENT (SAFE FALLBACK)
 ===================================================== */
 export const verifyPayment = async (req, res) => {
   const { reference } = req.body;
+
   const payment = await Payment.findOne({ reference });
+  if (!payment) return res.json({ success: false });
 
-  if (!payment) {
-    return res.json({ success: false });
-  }
-
-  if (payment.status === "SUCCESS") {
-    return res.json({ success: true });
-  }
-
-  return res.json({ success: false });
+  return res.json({ success: payment.status === "SUCCESS" });
 };
 
 /* =====================================================
-   GET TICKET BY REFERENCE
+   GET TICKET BY REFERENCE (READ ONLY)
 ===================================================== */
 export const getTicketByReference = async (req, res) => {
-  const { reference } = req.params;
+  try {
+    const { reference } = req.params;
 
-  const ticket = await Ticket.findOne({
-    paymentRef: reference,
-  }).populate("event");
+    const ticket = await Ticket.findOne({ paymentRef: reference })
+      .populate("event");
 
-  if (!ticket) {
-    return res.json({ status: "PENDING" });
+    if (!ticket || !ticket.qrImage) {
+      return res.json({ status: "PENDING" });
+    }
+
+    return res.json({
+      status: "READY",
+      event: {
+        title: ticket.event.title,
+        date: ticket.event.date,
+        location: ticket.event.location,
+      },
+      ticket: {
+        ticketType: ticket.ticketType,
+        qrImage: ticket.qrImage,
+      },
+    });
+  } catch (err) {
+    console.error("GET TICKET ERROR:", err);
+    return res.status(500).json({ status: "ERROR" });
   }
-
-  const qrImage = await QRCode.toDataURL(ticket.qrCode);
-
-  return res.json({
-    status: "READY",
-    event: {
-      title: ticket.event.title,
-      date: ticket.event.date,
-      location: ticket.event.location,
-    },
-    ticket: {
-      ticketType: ticket.ticketType,
-      qrImage,
-    },
-  });
 };
