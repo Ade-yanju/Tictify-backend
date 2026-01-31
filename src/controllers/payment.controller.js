@@ -21,9 +21,7 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
-    const ticketConfig = event.ticketTypes.find(
-      (t) => t.name === ticketType
-    );
+    const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
     if (!ticketConfig) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
@@ -109,7 +107,7 @@ export const initiatePayment = async (req, res) => {
           redirectUrl: `${process.env.BACKEND_URL}/api/payments/callback?ref=${reference}`,
           metadata: { eventId, ticketType, email },
         }),
-      }
+      },
     );
 
     const ercaspayData = await ercaspayRes.json();
@@ -137,25 +135,60 @@ export const initiatePayment = async (req, res) => {
 ===================================================== */
 export const paymentCallback = async (req, res) => {
   try {
-    const reference =
-      req.query.ref || req.query.reference || req.query.paymentReference;
+    // 1️⃣ Collect all possible reference candidates
+    const rawCandidates = [
+      req.query.ref,
+      req.query.reference,
+      req.query.paymentReference,
+      req.query.tx_reference,
+      req.query.trxref,
+      req.params?.reference,
+      req.originalUrl,
+    ].filter(Boolean);
+
+    // 2️⃣ Sanitize candidates
+    let reference = null;
+
+    for (const value of rawCandidates) {
+      // Convert to string and strip query params
+      const cleaned = String(value).split("?")[0].split("&")[0];
+
+      if (cleaned.startsWith("TICTIFY-")) {
+        reference = cleaned;
+        break;
+      }
+    }
 
     if (!reference) {
+      console.error("❌ Could not resolve payment reference", {
+        query: req.query,
+        params: req.params,
+        url: req.originalUrl,
+      });
+
       return res.redirect(`${process.env.FRONTEND_URL}/success`);
     }
 
-    // 🔒 UPSERT PAYMENT (CRITICAL FIX)
-    const payment = await Payment.findOneAndUpdate(
-      { reference },
-      { status: "SUCCESS" },
-      { new: true }
-    );
+    // 3️⃣ Find or create payment (IDEMPOTENT)
+    let payment = await Payment.findOne({ reference });
 
     if (!payment) {
-      console.error("❌ Payment missing even after callback:", reference);
-      return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
+      console.warn("⚠️ Payment not found, creating fallback:", reference);
+
+      payment = await Payment.create({
+        reference,
+        status: "SUCCESS",
+        provider: "ERCASPAY",
+        amount: 0,
+        platformFee: 0,
+        organizerAmount: 0,
+      });
+    } else if (payment.status !== "SUCCESS") {
+      payment.status = "SUCCESS";
+      await payment.save();
     }
 
+    // 4️⃣ Ensure ticket exists
     let ticket = await Ticket.findOne({ paymentRef: reference });
 
     if (!ticket) {
@@ -170,7 +203,7 @@ export const paymentCallback = async (req, res) => {
         qrImage,
         ticketType: payment.ticketType,
         paymentRef: reference,
-        amountPaid: payment.organizerAmount,
+        amountPaid: payment.organizerAmount || 0,
         currency: "NGN",
         scanned: false,
       });
@@ -202,8 +235,9 @@ export const getTicketByReference = async (req, res) => {
   try {
     const { reference } = req.params;
 
-    const ticket = await Ticket.findOne({ paymentRef: reference })
-      .populate("event");
+    const ticket = await Ticket.findOne({ paymentRef: reference }).populate(
+      "event",
+    );
 
     if (!ticket || !ticket.qrImage) {
       return res.json({ status: "PENDING" });

@@ -5,9 +5,7 @@ import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
 
 /* =====================================================
-   GET TICKET BY PAYMENT REFERENCE (SUCCESS PAGE)
-   🔒 READ ONLY
-   🔒 NO QR GENERATION HERE
+   GET TICKET BY PAYMENT REFERENCE
 ===================================================== */
 export const getTicketByReference = async (req, res) => {
   try {
@@ -21,14 +19,7 @@ export const getTicketByReference = async (req, res) => {
       paymentRef: reference,
     }).populate("event");
 
-    // Ticket not yet created
-    if (!ticket) {
-      return res.json({ status: "PENDING" });
-    }
-
-    // Ticket exists but QR missing → treat as pending (VERY IMPORTANT)
-    if (!ticket.qrImage) {
-      console.error("⚠️ Ticket missing QR image:", ticket._id);
+    if (!ticket || !ticket.qrImage) {
       return res.json({ status: "PENDING" });
     }
 
@@ -51,9 +42,7 @@ export const getTicketByReference = async (req, res) => {
 };
 
 /* =====================================================
-   ORGANIZER TICKET SALES & ANALYTICS
-   ✅ SAFE
-   ✅ NO CHANGES NEEDED
+   ORGANIZER SALES
 ===================================================== */
 export const getOrganizerTicketSales = async (req, res) => {
   try {
@@ -83,46 +72,7 @@ export const getOrganizerTicketSales = async (req, res) => {
       totalRevenue: 0,
     };
 
-    const eventsAgg = await Ticket.aggregate([
-      { $match: { organizer: organizerId } },
-      {
-        $lookup: {
-          from: "events",
-          localField: "event",
-          foreignField: "_id",
-          as: "event",
-        },
-      },
-      { $unwind: "$event" },
-      {
-        $group: {
-          _id: "$event._id",
-          title: { $first: "$event.title" },
-          status: { $first: "$event.status" },
-          date: { $first: "$event.date" },
-          ticketsSold: { $sum: 1 },
-          revenue: { $sum: "$amountPaid" },
-          scanned: {
-            $sum: { $cond: [{ $eq: ["$scanned", true] }, 1, 0] },
-          },
-        },
-      },
-      { $sort: { ticketsSold: -1 } },
-    ]);
-
-    return res.json({
-      stats,
-      events: eventsAgg.map((e) => ({
-        eventId: e._id,
-        title: e.title,
-        status: e.status,
-        date: e.date,
-        ticketsSold: e.ticketsSold,
-        scanned: e.scanned,
-        unscanned: e.ticketsSold - e.scanned,
-        revenue: e.revenue,
-      })),
-    });
+    return res.json({ stats });
   } catch (error) {
     console.error("TICKET SALES ERROR:", error);
     return res.status(500).json({ message: "Failed to load ticket sales" });
@@ -130,47 +80,73 @@ export const getOrganizerTicketSales = async (req, res) => {
 };
 
 /* =====================================================
-   SCAN TICKET (ORGANIZER ONLY)
-   🔒 SAFE
+   🔥 COLLISION-PROOF SCANNER
 ===================================================== */
 export const scanTicketController = async (req, res) => {
   try {
     const { code, eventId } = req.body;
-    const organizerId = req.user._id;
 
     if (!code || !eventId) {
       return res.status(400).json({ message: "Invalid scan data" });
     }
 
-    const event = await Event.findOne({
-      _id: eventId,
-      organizer: organizerId,
-      status: "LIVE",
-    });
+    /* ---------- VERIFY EVENT ---------- */
+    const event = await Event.findById(eventId);
 
     if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    if (event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({
         message: "You are not authorized to scan tickets for this event",
       });
     }
 
-    const ticket = await Ticket.findOne({
-      qrCode: code,
-      event: eventId,
-    });
+    if (event.status !== "LIVE") {
+      return res.status(400).json({
+        message: "Event is not live for scanning",
+      });
+    }
 
+    /* =====================================================
+       🔥 ATOMIC UPDATE (NO COLLISION POSSIBLE)
+    ===================================================== */
+
+    const ticket = await Ticket.findOneAndUpdate(
+      {
+        qrCode: code,
+        event: eventId,
+        scanned: false, // critical condition
+      },
+      {
+        scanned: true,
+        scannedAt: new Date(),
+      },
+      {
+        new: true,
+      },
+    );
+
+    /* ---------- INVALID OR ALREADY USED ---------- */
     if (!ticket) {
-      return res.status(404).json({ message: "Invalid ticket" });
+      const alreadyUsed = await Ticket.findOne({
+        qrCode: code,
+        event: eventId,
+      });
+
+      if (alreadyUsed) {
+        return res.status(409).json({
+          message: "Ticket already used",
+        });
+      }
+
+      return res.status(404).json({
+        message: "Invalid ticket",
+      });
     }
 
-    if (ticket.scanned) {
-      return res.status(409).json({ message: "Ticket already used" });
-    }
-
-    ticket.scanned = true;
-    ticket.scannedAt = new Date();
-    await ticket.save();
-
+    /* ---------- SUCCESS ---------- */
     return res.json({
       message: "Access granted",
       attendee: ticket.buyerEmail,
@@ -184,7 +160,6 @@ export const scanTicketController = async (req, res) => {
 
 /* =====================================================
    CREATE FREE TICKET
-   🔒 STORES QR IMAGE AT CREATION
 ===================================================== */
 export const createFreeTicket = async (req, res) => {
   try {

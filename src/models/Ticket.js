@@ -60,5 +60,6 @@ const ticketSchema = new mongoose.Schema(
   },
   { timestamps: true },
 );
+ticketSchema.index({ qrCode: 1, event: 1 });
 
 export default mongoose.model("Ticket", ticketSchema);
