@@ -49,18 +49,45 @@ export const getOrganizerEvents = async (req, res) => {
   res.json(events);
 };
 
-/* ================= PUBLIC ================= */
+/* ================= PUBLIC EVENTS ================= */
 export const getPublicEvents = async (_, res) => {
-  const events = await Event.find({ status: "LIVE" }).sort("date");
-  res.json(events);
+  const now = new Date();
+
+  const events = await Event.find({
+    status: "LIVE",
+    date: { $gt: now }, // 👈 hide started events
+  }).sort("date");
+
+  // 👇 Remove sold-out events
+  const availableEvents = events.filter((event) => {
+    const sold = event.ticketTypes.reduce(
+      (sum, t) => sum + (t.sold || 0),
+      0,
+    );
+    return sold < event.capacity;
+  });
+
+  res.json(availableEvents);
 };
 
+/* ================= SINGLE EVENT ================= */
 export const getEventById = async (req, res) => {
   const event = await Event.findById(req.params.id);
   if (!event) {
     return res.status(404).json({ message: "Event not found" });
   }
-  res.json(event);
+
+  const now = new Date();
+  const sold = event.ticketTypes.reduce(
+    (sum, t) => sum + (t.sold || 0),
+    0,
+  );
+
+  res.json({
+    ...event.toObject(),
+    isSoldOut: sold >= event.capacity,
+    isSelling: now < new Date(event.date) && sold < event.capacity,
+  });
 };
 
 /* ================= STATUS ================= */
@@ -72,4 +99,28 @@ export const publishEvent = async (req, res) => {
 export const endEvent = async (req, res) => {
   await Event.findByIdAndUpdate(req.params.id, { status: "ENDED" });
   res.json({ message: "Event ended" });
+};
+
+/* ================= DELETE EVENT ================= */
+export const deleteEvent = async (req, res) => {
+  const event = await Event.findById(req.params.id);
+
+  if (!event) {
+    return res.status(404).json({ message: "Event not found" });
+  }
+
+  // 👇 Only owner can delete
+  if (event.organizer.toString() !== req.user._id.toString()) {
+    return res.status(403).json({ message: "Not authorized" });
+  }
+
+  // 👇 Only ended events can be deleted
+  if (event.status !== "ENDED") {
+    return res
+      .status(400)
+      .json({ message: "Only ended events can be deleted" });
+  }
+
+  await event.deleteOne();
+  res.json({ message: "Event deleted successfully" });
 };

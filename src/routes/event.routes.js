@@ -32,5 +32,12 @@ router.patch("/end/:id", authenticate, authorize("organizer"), endEvent);
 
 router.get("/", getPublicEvents);
 router.get("/view/:id", getEventById);
+router.delete(
+  "/events/:id",
+  authenticate,
+  authorize("organizer"),
+  deleteEvent,
+);
+
 
 export default router;

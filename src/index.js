@@ -39,7 +39,9 @@ app.use(
     credentials: true,
   }),
 );
-app.use("/api/webhooks", express.raw({ type: "application/json" }));
+app.use("/api/webhooks/ercaspay", express.raw({ type: "application/json" }));
+
+app.use(express.json());
 
 app.use(express.json());
 
