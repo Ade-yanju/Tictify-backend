@@ -6,6 +6,7 @@ import {
   getEventById,
   publishEvent,
   endEvent,
+  deleteEvent,
 } from "../controllers/event.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
@@ -32,12 +33,6 @@ router.patch("/end/:id", authenticate, authorize("organizer"), endEvent);
 
 router.get("/", getPublicEvents);
 router.get("/view/:id", getEventById);
-router.delete(
-  "/events/:id",
-  authenticate,
-  authorize("organizer"),
-  deleteEvent,
-);
-
+router.delete("/events/:id", authenticate, authorize("organizer"), deleteEvent);
 
 export default router;
