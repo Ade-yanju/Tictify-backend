@@ -192,12 +192,12 @@ export const deleteEvent = async (req, res) => {
       return res.status(404).json({ message: "Event not found" });
     }
 
-    // 🔒 Ownership check
+    // Owner check
     if (event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Not authorized" });
     }
 
-    // 🔥 Auto-end before deletion check
+    // 🔥 AUTO-END IF TIME HAS PASSED
     if (event.status === "LIVE" && now >= event.endDate) {
       event.status = "ENDED";
       await event.save();

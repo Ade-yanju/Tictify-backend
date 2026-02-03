@@ -13,8 +13,10 @@ import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
+/* ================= CREATE ================= */
 router.post("/", authenticate, authorize("organizer"), createEvent);
 
+/* ================= ORGANIZER ================= */
 router.get(
   "/organizer",
   authenticate,
@@ -31,8 +33,11 @@ router.patch(
 
 router.patch("/end/:id", authenticate, authorize("organizer"), endEvent);
 
+/* ================= DELETE (FIXED) ================= */
+router.delete("/:id", authenticate, authorize("organizer"), deleteEvent);
+
+/* ================= PUBLIC ================= */
 router.get("/", getPublicEvents);
 router.get("/view/:id", getEventById);
-router.delete("/events/:id", authenticate, authorize("organizer"), deleteEvent);
 
 export default router;
