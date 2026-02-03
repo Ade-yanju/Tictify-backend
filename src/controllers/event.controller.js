@@ -9,10 +9,10 @@ export const createEvent = async (req, res) => {
       description,
       location,
       date, // start time
-      endDate, // 🔥 new
+      endDate, // end time
       capacity,
       ticketTypes,
-      status,
+      status = "DRAFT",
       banner,
     } = req.body;
 
@@ -41,12 +41,12 @@ export const createEvent = async (req, res) => {
       title,
       description,
       location,
-      date,
-      endDate,
+      date: new Date(date),
+      endDate: new Date(endDate),
       capacity,
       ticketTypes: ticketTypes.map((t) => ({
         ...t,
-        sold: 0, // 🔒 initialize safely
+        sold: 0,
       })),
       status,
       banner,
@@ -61,10 +61,28 @@ export const createEvent = async (req, res) => {
 
 /* ================= ORGANIZER EVENTS ================= */
 export const getOrganizerEvents = async (req, res) => {
-  const events = await Event.find({ organizer: req.user._id }).sort(
-    "-createdAt",
-  );
-  res.json(events);
+  try {
+    const now = new Date();
+
+    // 🔥 Auto-end expired events for THIS organizer
+    await Event.updateMany(
+      {
+        organizer: req.user._id,
+        status: "LIVE",
+        endDate: { $lte: now },
+      },
+      { status: "ENDED" },
+    );
+
+    const events = await Event.find({
+      organizer: req.user._id,
+    }).sort("-createdAt");
+
+    res.json(events);
+  } catch (err) {
+    console.error("GET ORGANIZER EVENTS ERROR:", err);
+    res.status(500).json({ message: "Unable to load events" });
+  }
 };
 
 /* ================= PUBLIC EVENTS ================= */
@@ -72,10 +90,7 @@ export const getPublicEvents = async (_, res) => {
   try {
     const now = new Date();
 
-    /**
-     * 1️⃣ AUTO-END EVENTS THAT HAVE PASSED END TIME
-     * This keeps DB clean and avoids cron jobs
-     */
+    // 🔥 Global auto-end
     await Event.updateMany(
       {
         status: "LIVE",
@@ -84,21 +99,13 @@ export const getPublicEvents = async (_, res) => {
       { status: "ENDED" },
     );
 
-    /**
-     * 2️⃣ FETCH ONLY EVENTS THAT:
-     * - are LIVE
-     * - have not started
-     * - have not ended
-     */
+    // 🔥 Only upcoming + live events
     const events = await Event.find({
       status: "LIVE",
-      date: { $gt: now }, // not started
-      endDate: { $gt: now }, // not ended
+      date: { $gt: now },
+      endDate: { $gt: now },
     }).sort("date");
 
-    /**
-     * 3️⃣ REMOVE SOLD-OUT EVENTS
-     */
     const availableEvents = events.filter((event) => {
       const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
       return sold < event.capacity;
@@ -113,25 +120,61 @@ export const getPublicEvents = async (_, res) => {
 
 /* ================= SINGLE EVENT ================= */
 export const getEventById = async (req, res) => {
-  const event = await Event.findById(req.params.id);
-  if (!event) {
-    return res.status(404).json({ message: "Event not found" });
+  try {
+    const now = new Date();
+
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    // 🔥 Auto-end if expired
+    if (event.status === "LIVE" && now >= event.endDate) {
+      event.status = "ENDED";
+      await event.save();
+    }
+
+    const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
+
+    res.json({
+      ...event.toObject(),
+      isSoldOut: sold >= event.capacity,
+      isSelling:
+        event.status === "LIVE" && now < event.endDate && sold < event.capacity,
+    });
+  } catch (err) {
+    console.error("GET EVENT ERROR:", err);
+    res.status(500).json({ message: "Unable to load event" });
   }
-
-  const now = new Date();
-  const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
-
-  res.json({
-    ...event.toObject(),
-    isSoldOut: sold >= event.capacity,
-    isSelling: now < new Date(event.date) && sold < event.capacity,
-  });
 };
 
 /* ================= STATUS ================= */
 export const publishEvent = async (req, res) => {
-  await Event.findByIdAndUpdate(req.params.id, { status: "LIVE" });
-  res.json({ message: "Event published" });
+  try {
+    const now = new Date();
+
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    // ❌ Cannot publish expired event
+    if (now >= event.endDate) {
+      event.status = "ENDED";
+      await event.save();
+      return res
+        .status(400)
+        .json({ message: "Cannot publish an event that has ended" });
+    }
+
+    event.status = "LIVE";
+    await event.save();
+
+    res.json({ message: "Event published" });
+  } catch (err) {
+    console.error("PUBLISH EVENT ERROR:", err);
+    res.status(500).json({ message: "Unable to publish event" });
+  }
 };
 
 export const endEvent = async (req, res) => {
@@ -141,24 +184,35 @@ export const endEvent = async (req, res) => {
 
 /* ================= DELETE EVENT ================= */
 export const deleteEvent = async (req, res) => {
-  const event = await Event.findById(req.params.id);
+  try {
+    const now = new Date();
 
-  if (!event) {
-    return res.status(404).json({ message: "Event not found" });
+    const event = await Event.findById(req.params.id);
+    if (!event) {
+      return res.status(404).json({ message: "Event not found" });
+    }
+
+    // 🔒 Ownership check
+    if (event.organizer.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Not authorized" });
+    }
+
+    // 🔥 Auto-end before deletion check
+    if (event.status === "LIVE" && now >= event.endDate) {
+      event.status = "ENDED";
+      await event.save();
+    }
+
+    if (event.status !== "ENDED") {
+      return res
+        .status(400)
+        .json({ message: "Only ended events can be deleted" });
+    }
+
+    await event.deleteOne();
+    res.json({ message: "Event deleted successfully" });
+  } catch (err) {
+    console.error("DELETE EVENT ERROR:", err);
+    res.status(500).json({ message: "Unable to delete event" });
   }
-
-  // 👇 Only owner can delete
-  if (event.organizer.toString() !== req.user._id.toString()) {
-    return res.status(403).json({ message: "Not authorized" });
-  }
-
-  // 👇 Only ended events can be deleted
-  if (event.status !== "ENDED") {
-    return res
-      .status(400)
-      .json({ message: "Only ended events can be deleted" });
-  }
-
-  await event.deleteOne();
-  res.json({ message: "Event deleted successfully" });
 };
