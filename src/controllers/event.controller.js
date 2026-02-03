@@ -1,13 +1,15 @@
 import Event from "../models/Event.js";
 
 /* ================= CREATE EVENT ================= */
+
 export const createEvent = async (req, res) => {
   try {
     const {
       title,
       description,
       location,
-      date,
+      date, // start time
+      endDate, // 🔥 new
       capacity,
       ticketTypes,
       status,
@@ -22,14 +24,30 @@ export const createEvent = async (req, res) => {
       return res.status(400).json({ message: "Event banner is required" });
     }
 
+    if (!date || !endDate) {
+      return res
+        .status(400)
+        .json({ message: "Event start and end time are required" });
+    }
+
+    if (new Date(endDate) <= new Date(date)) {
+      return res
+        .status(400)
+        .json({ message: "Event end time must be after start time" });
+    }
+
     const event = await Event.create({
       organizer: req.user._id,
       title,
       description,
       location,
       date,
+      endDate,
       capacity,
-      ticketTypes,
+      ticketTypes: ticketTypes.map((t) => ({
+        ...t,
+        sold: 0, // 🔒 initialize safely
+      })),
       status,
       banner,
     });
@@ -51,23 +69,46 @@ export const getOrganizerEvents = async (req, res) => {
 
 /* ================= PUBLIC EVENTS ================= */
 export const getPublicEvents = async (_, res) => {
-  const now = new Date();
+  try {
+    const now = new Date();
 
-  const events = await Event.find({
-    status: "LIVE",
-    date: { $gt: now }, // 👈 hide started events
-  }).sort("date");
-
-  // 👇 Remove sold-out events
-  const availableEvents = events.filter((event) => {
-    const sold = event.ticketTypes.reduce(
-      (sum, t) => sum + (t.sold || 0),
-      0,
+    /**
+     * 1️⃣ AUTO-END EVENTS THAT HAVE PASSED END TIME
+     * This keeps DB clean and avoids cron jobs
+     */
+    await Event.updateMany(
+      {
+        status: "LIVE",
+        endDate: { $lte: now },
+      },
+      { status: "ENDED" },
     );
-    return sold < event.capacity;
-  });
 
-  res.json(availableEvents);
+    /**
+     * 2️⃣ FETCH ONLY EVENTS THAT:
+     * - are LIVE
+     * - have not started
+     * - have not ended
+     */
+    const events = await Event.find({
+      status: "LIVE",
+      date: { $gt: now }, // not started
+      endDate: { $gt: now }, // not ended
+    }).sort("date");
+
+    /**
+     * 3️⃣ REMOVE SOLD-OUT EVENTS
+     */
+    const availableEvents = events.filter((event) => {
+      const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
+      return sold < event.capacity;
+    });
+
+    res.json(availableEvents);
+  } catch (err) {
+    console.error("GET PUBLIC EVENTS ERROR:", err);
+    res.status(500).json({ message: "Unable to load events" });
+  }
 };
 
 /* ================= SINGLE EVENT ================= */
@@ -78,10 +119,7 @@ export const getEventById = async (req, res) => {
   }
 
   const now = new Date();
-  const sold = event.ticketTypes.reduce(
-    (sum, t) => sum + (t.sold || 0),
-    0,
-  );
+  const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
 
   res.json({
     ...event.toObject(),

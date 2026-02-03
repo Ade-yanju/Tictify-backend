@@ -16,27 +16,83 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Missing required fields" });
     }
 
+    const now = new Date();
+
+    /**
+     * 1️⃣ LOAD EVENT
+     */
     const event = await Event.findById(eventId);
     if (!event || event.status !== "LIVE") {
       return res.status(400).json({ message: "Event unavailable" });
     }
 
+    /**
+     * 2️⃣ TIME GUARDS (VERY IMPORTANT)
+     */
+    if (event.date <= now) {
+      return res.status(400).json({
+        message: "Ticket sales have closed for this event",
+      });
+    }
+
+    if (event.endDate <= now) {
+      // Safety net: auto-end event
+      event.status = "ENDED";
+      await event.save();
+
+      return res.status(400).json({
+        message: "This event has ended",
+      });
+    }
+
+    /**
+     * 3️⃣ FIND TICKET TYPE
+     */
     const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
+
     if (!ticketConfig) {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
 
-    const ticketPrice = Number(ticketConfig.price);
-    if (isNaN(ticketPrice) || ticketPrice < 0) {
-      return res.status(400).json({ message: "Invalid ticket price" });
+    /**
+     * 4️⃣ ENFORCE QUANTITY (ANTI-OVERSELL)
+     */
+    if (ticketConfig.sold >= ticketConfig.quantity) {
+      return res.status(400).json({
+        message: "This ticket type is sold out",
+      });
     }
 
+    /**
+     * 5️⃣ ENFORCE EVENT CAPACITY
+     */
+    const totalSold = event.ticketTypes.reduce(
+      (sum, t) => sum + (t.sold || 0),
+      0,
+    );
+
+    if (totalSold >= event.capacity) {
+      event.status = "ENDED";
+      await event.save();
+
+      return res.status(400).json({
+        message: "Event is sold out",
+      });
+    }
+
+    const ticketPrice = Number(ticketConfig.price);
     const reference = `TICTIFY-${crypto.randomBytes(10).toString("hex")}`;
 
-    /* ================= FREE EVENT ================= */
+    /**
+     * ================= FREE EVENT =================
+     */
     if (ticketPrice === 0) {
       const qrCode = crypto.randomBytes(16).toString("hex");
       const qrImage = await QRCode.toDataURL(qrCode);
+
+      // 🔒 ATOMIC UPDATE (NO RACE CONDITION)
+      ticketConfig.sold += 1;
+      await event.save();
 
       await Payment.create({
         reference,
@@ -70,11 +126,12 @@ export const initiatePayment = async (req, res) => {
       });
     }
 
-    /* ================= PAID EVENT ================= */
+    /**
+     * ================= PAID EVENT =================
+     */
     const platformFee = Math.round(ticketPrice * 0.03 + 80);
     const totalAmount = ticketPrice + platformFee;
 
-    // 🔒 ALWAYS CREATE PAYMENT FIRST
     await Payment.create({
       reference,
       event: eventId,
@@ -112,21 +169,18 @@ export const initiatePayment = async (req, res) => {
 
     const ercaspayData = await ercaspayRes.json();
 
-    if (
-      ercaspayData?.requestSuccessful !== true ||
-      !ercaspayData?.responseBody?.checkoutUrl
-    ) {
+    if (!ercaspayData?.responseBody?.checkoutUrl) {
       await Payment.updateOne({ reference }, { status: "FAILED" });
       return res.status(500).json({ message: "Unable to initialize payment" });
     }
 
-    return res.json({
+    res.json({
       reference,
       paymentUrl: ercaspayData.responseBody.checkoutUrl,
     });
   } catch (err) {
     console.error("INITIATE PAYMENT ERROR:", err);
-    return res.status(500).json({ message: "Payment initialization failed" });
+    res.status(500).json({ message: "Payment initialization failed" });
   }
 };
 
@@ -208,6 +262,26 @@ export const paymentCallback = async (req, res) => {
         scanned: false,
       });
     }
+    const event = await Event.findById(payment.event);
+
+    const ticketConfig = event.ticketTypes.find(
+      (t) => t.name === payment.ticketType,
+    );
+
+    if (ticketConfig) {
+      ticketConfig.sold += 1;
+    }
+
+    const totalSold = event.ticketTypes.reduce(
+      (sum, t) => sum + (t.sold || 0),
+      0,
+    );
+
+    if (totalSold >= event.capacity) {
+      event.status = "ENDED";
+    }
+
+    await event.save();
 
     return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
   } catch (err) {

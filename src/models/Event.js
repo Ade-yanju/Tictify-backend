@@ -4,7 +4,8 @@ const ticketTypeSchema = new mongoose.Schema(
   {
     name: { type: String, required: true },
     price: { type: Number, required: true },
-    quantity: { type: Number, required: true },
+    quantity: { type: Number, required: true }, // total available
+    sold: { type: Number, default: 0 }, // 🔥 track sold tickets
   },
   { _id: false },
 );
@@ -20,10 +21,20 @@ const eventSchema = new mongoose.Schema(
     title: { type: String, required: true },
     description: { type: String, required: true },
     location: { type: String, required: true },
-    date: { type: Date, required: true },
+
+    // ⏰ EVENT TIMING
+    date: {
+      type: Date,
+      required: true, // START TIME (keep name to avoid breaking frontend)
+    },
+
+    endDate: {
+      type: Date,
+      required: true, // 🔥 NEW: EVENT END TIME
+    },
 
     banner: {
-      type: String, // ImgBB URL
+      type: String,
       required: true,
     },
 
