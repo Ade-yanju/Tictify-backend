@@ -90,22 +90,18 @@ export const getPublicEvents = async (_, res) => {
   try {
     const now = new Date();
 
-    // 🔥 Global auto-end
+    // 🔒 Hard guarantee: ended events never show
+    const events = await Event.find({
+      endDate: { $gt: now }, // 👈 THIS is the key
+    }).sort("date");
+
+    // 🔄 Auto-correct status (optional but safe)
     await Event.updateMany(
-      {
-        status: "LIVE",
-        endDate: { $lte: now },
-      },
+      { endDate: { $lte: now }, status: { $ne: "ENDED" } },
       { status: "ENDED" },
     );
 
-    // 🔥 Only upcoming + live events
-    const events = await Event.find({
-      status: "LIVE",
-      date: { $gt: now },
-      endDate: { $gt: now },
-    }).sort("date");
-
+    // 🎟 Remove sold-out events
     const availableEvents = events.filter((event) => {
       const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
       return sold < event.capacity;
