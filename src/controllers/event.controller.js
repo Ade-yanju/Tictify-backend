@@ -91,29 +91,31 @@ export const getPublicEvents = async (_, res) => {
     const now = new Date();
 
     /**
-     * HARD RULE:
-     * ❌ Events past endDate NEVER appear publicly
-     */
-    const events = await Event.find({
-      endDate: { $gt: now }, // 👈 THIS is the authority
-    }).sort("date");
-
-    /**
-     * Optional self-healing (not required, but good)
+     * 1️⃣ FORCE DATABASE CONSISTENCY
+     * Any event past endDate is ENDED — permanently
      */
     await Event.updateMany(
-      { endDate: { $lte: now }, status: { $ne: "ENDED" } },
+      {
+        endDate: { $lte: now },
+        status: { $ne: "ENDED" },
+      },
       { status: "ENDED" },
     );
 
     /**
-     * Remove sold-out events
+     * 2️⃣ ONLY FETCH VALID EVENTS
+     * ❌ ENDED EVENTS NEVER COME BACK
+     */
+    const events = await Event.find({
+      status: "LIVE",
+      endDate: { $gt: now },
+    }).sort("date");
+
+    /**
+     * 3️⃣ REMOVE SOLD-OUT EVENTS
      */
     const availableEvents = events.filter((event) => {
-      const sold = event.ticketTypes.reduce(
-        (sum, t) => sum + (t.sold || 0),
-        0,
-      );
+      const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
       return sold < event.capacity;
     });
 
@@ -123,7 +125,6 @@ export const getPublicEvents = async (_, res) => {
     res.status(500).json({ message: "Unable to load events" });
   }
 };
-
 
 /* ================= SINGLE EVENT ================= */
 export const getEventById = async (req, res) => {
