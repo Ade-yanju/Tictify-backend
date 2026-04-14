@@ -6,7 +6,7 @@ import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 
 /* =====================================================
-   INITIATE PAYMENT (FREE OR ERCASPAY)
+   INITIATE PAYMENT (FREE OR PAYSTACK)
 ===================================================== */
 export const initiatePayment = async (req, res) => {
   try {
@@ -27,7 +27,7 @@ export const initiatePayment = async (req, res) => {
     }
 
     /**
-     * 2️⃣ TIME GUARDS (VERY IMPORTANT)
+     * 2️⃣ TIME GUARDS
      */
     if (event.date <= now) {
       return res.status(400).json({
@@ -36,10 +36,8 @@ export const initiatePayment = async (req, res) => {
     }
 
     if (event.endDate <= now) {
-      // Safety net: auto-end event
       event.status = "ENDED";
       await event.save();
-
       return res.status(400).json({
         message: "This event has ended",
       });
@@ -55,7 +53,7 @@ export const initiatePayment = async (req, res) => {
     }
 
     /**
-     * 4️⃣ ENFORCE QUANTITY (ANTI-OVERSELL)
+     * 4️⃣ ENFORCE QUANTITY
      */
     if (ticketConfig.sold >= ticketConfig.quantity) {
       return res.status(400).json({
@@ -74,7 +72,6 @@ export const initiatePayment = async (req, res) => {
     if (totalSold >= event.capacity) {
       event.status = "ENDED";
       await event.save();
-
       return res.status(400).json({
         message: "Event is sold out",
       });
@@ -90,7 +87,6 @@ export const initiatePayment = async (req, res) => {
       const qrCode = crypto.randomBytes(16).toString("hex");
       const qrImage = await QRCode.toDataURL(qrCode);
 
-      // 🔒 ATOMIC UPDATE (NO RACE CONDITION)
       ticketConfig.sold += 1;
       await event.save();
 
@@ -127,7 +123,7 @@ export const initiatePayment = async (req, res) => {
     }
 
     /**
-     * ================= PAID EVENT =================
+     * ================= PAID EVENT (PAYSTACK) =================
      */
     const platformFee = Math.round(ticketPrice * 0.03 + 80);
     const totalAmount = ticketPrice + platformFee;
@@ -142,41 +138,40 @@ export const initiatePayment = async (req, res) => {
       platformFee,
       organizerAmount: ticketPrice,
       status: "PENDING",
-      provider: "ERCASPAY",
+      provider: "PAYSTACK",
     });
 
-    const ercaspayRes = await fetch(
-      "https://api.ercaspay.com/api/v1/payment/initiate",
+    const paystackRes = await fetch(
+      "https://api.paystack.co/transaction/initialize",
       {
         method: "POST",
         headers: {
-          Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
           "Content-Type": "application/json",
-          Accept: "application/json",
         },
         body: JSON.stringify({
-          amount: totalAmount,
-          paymentReference: reference,
-          paymentMethods: "card,bank-transfer,ussd,qrcode",
-          customerName: name,
-          customerEmail: email,
+          amount: totalAmount * 100, // Paystack expects Kobo
+          email: email,
+          reference: reference,
           currency: "NGN",
-          redirectUrl: `${process.env.BACKEND_URL}/api/payments/callback?ref=${reference}`,
-          metadata: { eventId, ticketType, email },
+          callback_url: `${process.env.BACKEND_URL}/api/payments/callback`,
+          metadata: { eventId, ticketType, email, customerName: name },
         }),
       },
     );
 
-    const ercaspayData = await ercaspayRes.json();
+    const paystackData = await paystackRes.json();
 
-    if (!ercaspayData?.responseBody?.checkoutUrl) {
+    if (!paystackData.status || !paystackData.data?.authorization_url) {
       await Payment.updateOne({ reference }, { status: "FAILED" });
-      return res.status(500).json({ message: "Unable to initialize payment" });
+      return res
+        .status(500)
+        .json({ message: "Unable to initialize payment with Paystack" });
     }
 
     res.json({
       reference,
-      paymentUrl: ercaspayData.responseBody.checkoutUrl,
+      paymentUrl: paystackData.data.authorization_url,
     });
   } catch (err) {
     console.error("INITIATE PAYMENT ERROR:", err);
@@ -185,28 +180,21 @@ export const initiatePayment = async (req, res) => {
 };
 
 /* =====================================================
-   ERCASPAY CALLBACK — FINAL SOURCE OF TRUTH
+   PAYSTACK CALLBACK & VERIFICATION
 ===================================================== */
 export const paymentCallback = async (req, res) => {
   try {
-    // 1️⃣ Collect all possible reference candidates
+    // 1️⃣ Collect reference candidates (Paystack uses 'reference' or 'trxref')
     const rawCandidates = [
-      req.query.ref,
       req.query.reference,
-      req.query.paymentReference,
-      req.query.tx_reference,
       req.query.trxref,
+      req.query.ref,
       req.params?.reference,
-      req.originalUrl,
     ].filter(Boolean);
 
-    // 2️⃣ Sanitize candidates
     let reference = null;
-
     for (const value of rawCandidates) {
-      // Convert to string and strip query params
       const cleaned = String(value).split("?")[0].split("&")[0];
-
       if (cleaned.startsWith("TICTIFY-")) {
         reference = cleaned;
         break;
@@ -214,35 +202,54 @@ export const paymentCallback = async (req, res) => {
     }
 
     if (!reference) {
-      console.error("❌ Could not resolve payment reference", {
-        query: req.query,
-        params: req.params,
-        url: req.originalUrl,
-      });
-
+      console.error("❌ Could not resolve payment reference");
       return res.redirect(`${process.env.FRONTEND_URL}/success`);
     }
 
-    // 3️⃣ Find or create payment (IDEMPOTENT)
+    // 2️⃣ Verify the transaction directly with Paystack
+    const verifyRes = await fetch(
+      `https://api.paystack.co/transaction/verify/${reference}`,
+      {
+        method: "GET",
+        headers: {
+          Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+        },
+      },
+    );
+
+    const verifyData = await verifyRes.json();
+
+    // 3️⃣ Block if payment wasn't successful
+    if (!verifyData.status || verifyData.data.status !== "success") {
+      console.warn(`⚠️ Unsuccessful payment attempt for ref: ${reference}`);
+      await Payment.updateOne({ reference }, { status: "FAILED" });
+      return res.redirect(`${process.env.FRONTEND_URL}/payment-failed`); // Add a failed page if you have one
+    }
+
+    // 4️⃣ Find or create payment
     let payment = await Payment.findOne({ reference });
 
     if (!payment) {
-      console.warn("⚠️ Payment not found, creating fallback:", reference);
-
+      console.warn(
+        "⚠️ Payment not found in DB, resolving from Paystack metadata",
+      );
+      // Fallback if DB insert failed during initialization but payment succeeded
+      const { metadata } = verifyData.data;
       payment = await Payment.create({
         reference,
+        event: metadata.eventId,
+        ticketType: metadata.ticketType,
+        email: metadata.email,
         status: "SUCCESS",
-        provider: "ERCASPAY",
-        amount: 0,
-        platformFee: 0,
-        organizerAmount: 0,
+        provider: "PAYSTACK",
+        amount: verifyData.data.amount / 100, // Convert Kobo back to NGN
       });
     } else if (payment.status !== "SUCCESS") {
       payment.status = "SUCCESS";
       await payment.save();
     }
 
-    // 4️⃣ Ensure ticket exists
+    // 5️⃣ Generate Ticket
     let ticket = await Ticket.findOne({ paymentRef: reference });
 
     if (!ticket) {
@@ -257,31 +264,31 @@ export const paymentCallback = async (req, res) => {
         qrImage,
         ticketType: payment.ticketType,
         paymentRef: reference,
-        amountPaid: payment.organizerAmount || 0,
+        amountPaid: payment.organizerAmount || verifyData.data.amount / 100,
         currency: "NGN",
         scanned: false,
       });
+
+      // Update event capacity only if ticket is newly generated
+      const event = await Event.findById(payment.event);
+      if (event) {
+        const ticketConfig = event.ticketTypes.find(
+          (t) => t.name === payment.ticketType,
+        );
+        if (ticketConfig) {
+          ticketConfig.sold += 1;
+        }
+
+        const totalSold = event.ticketTypes.reduce(
+          (sum, t) => sum + (t.sold || 0),
+          0,
+        );
+        if (totalSold >= event.capacity) {
+          event.status = "ENDED";
+        }
+        await event.save();
+      }
     }
-    const event = await Event.findById(payment.event);
-
-    const ticketConfig = event.ticketTypes.find(
-      (t) => t.name === payment.ticketType,
-    );
-
-    if (ticketConfig) {
-      ticketConfig.sold += 1;
-    }
-
-    const totalSold = event.ticketTypes.reduce(
-      (sum, t) => sum + (t.sold || 0),
-      0,
-    );
-
-    if (totalSold >= event.capacity) {
-      event.status = "ENDED";
-    }
-
-    await event.save();
 
     return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
   } catch (err) {
@@ -291,14 +298,13 @@ export const paymentCallback = async (req, res) => {
 };
 
 /* =====================================================
-   VERIFY PAYMENT (SAFE FALLBACK)
+   VERIFY PAYMENT (SAFE FALLBACK / POLLING)
 ===================================================== */
 export const verifyPayment = async (req, res) => {
   const { reference } = req.body;
-
   const payment = await Payment.findOne({ reference });
-  if (!payment) return res.json({ success: false });
 
+  if (!payment) return res.json({ success: false });
   return res.json({ success: payment.status === "SUCCESS" });
 };
 
