@@ -4,6 +4,7 @@ import {
   getOrganizerTicketSales,
   scanTicketController,
   createFreeTicket,
+  sendTicketViaEmail,
 } from "../controllers/ticket.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
@@ -29,5 +30,6 @@ router.post(
 );
 
 router.post("/free", createFreeTicket);
+router.post("/send-email", sendTicketViaEmail);
 
 export default router;
