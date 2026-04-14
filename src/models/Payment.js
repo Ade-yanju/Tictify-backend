@@ -56,8 +56,8 @@ const paymentSchema = new mongoose.Schema(
 
     provider: {
       type: String,
-      enum: ["FREE", "ERCASPAY"],
-      default: "ERCASPAY",
+      enum: ["FREE", "ERCASPAY", "PAYSTACK", "FLUTTERWAVE"],
+      default: "PAYSTACK",
     },
 
     paymentMethods: {
