@@ -39,7 +39,7 @@ export const sendTicketViaEmail = async (req, res) => {
           Authorization: `Bearer ${process.env.SENDCHAMP_KEY}`,
         },
         body: JSON.stringify({
-          to: [email],
+          to: [{ email: email, name: "Attendee" }],
           from: "Tictify", // Must be a verified Sender Name in your SendChamp account
           subject: `Your Ticket for ${ticket.event.title}`,
           message_body: `
