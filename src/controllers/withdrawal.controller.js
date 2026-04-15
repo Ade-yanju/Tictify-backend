@@ -6,22 +6,23 @@ const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
 export const requestWithdrawal = async (req, res) => {
   const { amount, bankDetails } = req.body;
+  const userId = req.user.id; // Unified with your dashboard logic
 
   try {
-    const wallet = await Wallet.findOne({ organizer: req.user._id });
+    // 1. Fetch wallet and validate balance
+    const wallet = await Wallet.findOne({ organizer: userId });
 
     if (!wallet || wallet.balance < amount) {
       return res.status(400).json({ message: "Insufficient wallet balance" });
     }
 
-    // 1. DEDUCT WALLET IMMEDIATELY (Anti-Fraud Lock)
-    // This prevents a user from double-clicking and firing two Paystack requests
-    // before the database has time to update.
+    // 2. Immediate Deduction (Anti-fraud lock)
+    // We deduct first so they can't spam the "Submit" button
     wallet.balance -= amount;
     await wallet.save();
 
     try {
-      // 2. CREATE PAYSTACK RECIPIENT
+      // 3. Create Paystack Recipient
       const recipientResponse = await fetch(
         "https://api.paystack.co/transferrecipient",
         {
@@ -43,15 +44,11 @@ export const requestWithdrawal = async (req, res) => {
       const recipientData = await recipientResponse.json();
 
       if (!recipientData.status) {
-        throw new Error(`Paystack Recipient Error: ${recipientData.message}`);
+        // Log the exact message from Paystack to help debugging
+        throw new Error(`Recipient Setup Failed: ${recipientData.message}`);
       }
 
-      const recipientCode = recipientData.data.recipient_code;
-
-      // 3. INITIATE PAYSTACK TRANSFER
-      // Paystack expects amount in Kobo (Multiply by 100)
-      const amountInKobo = amount * 100;
-
+      // 4. Initiate Transfer
       const transferResponse = await fetch("https://api.paystack.co/transfer", {
         method: "POST",
         headers: {
@@ -59,70 +56,55 @@ export const requestWithdrawal = async (req, res) => {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          source: "balance", // Pulls from your Paystack Balance
-          amount: amountInKobo,
-          recipient: recipientCode,
-          reason: "Organizer Payout",
+          source: "balance",
+          amount: amount * 100, // Convert to Kobo
+          recipient: recipientData.data.recipient_code,
+          reason: `Payout for ${bankDetails.accountName}`,
         }),
       });
 
       const transferData = await transferResponse.json();
 
       if (!transferData.status) {
-        throw new Error(`Paystack Transfer Error: ${transferData.message}`);
+        throw new Error(`Transfer Failed: ${transferData.message}`);
       }
 
-      // 4. LOG TRANSACTIONS UPON SUCCESS
-      wallet.totalWithdrawn += amount;
+      // 5. Log Success
+      wallet.totalWithdrawn = (wallet.totalWithdrawn || 0) + amount;
       await wallet.save();
 
       await WalletTransaction.create({
-        organizer: req.user._id,
+        organizer: userId,
         type: "DEBIT",
         amount,
-        reference: transferData.data.reference || `WD-${Date.now()}`,
-        description: "Instant Withdrawal via Paystack",
+        reference: transferData.data.reference,
+        description: "Instant Payout via Paystack",
       });
 
       const withdrawal = await Withdrawal.create({
-        organizer: req.user._id,
+        organizer: userId,
         amount,
         bankDetails,
-        status: "APPROVED", // Instantly approved
+        status: "APPROVED",
         paystackReference: transferData.data.reference,
       });
 
       return res.status(200).json({
-        message: "Withdrawal successful. Funds are on the way!",
+        message: "Funds are on the way!",
         withdrawal,
       });
     } catch (paystackError) {
-      // 5. ROLLBACK IF PAYSTACK FAILS
-      // If the API call fails, give the user their money back immediately
+      // ROLLBACK: Return money to wallet if Paystack rejects the request
       wallet.balance += amount;
       await wallet.save();
 
-      console.error("PAYSTACK ERROR:", paystackError.message);
-      return res
-        .status(400)
-        .json({
-          message:
-            paystackError.message || "Transfer failed. Balance refunded.",
-        });
+      console.error("PAYSTACK REJECTION:", paystackError.message);
+      return res.status(400).json({ message: paystackError.message });
     }
   } catch (err) {
-    console.error("WITHDRAWAL ERROR:", err);
+    console.error("INTERNAL WITHDRAWAL ERROR:", err);
     res
       .status(500)
-      .json({ message: "Internal server error during withdrawal" });
+      .json({ message: "Critical error during withdrawal processing." });
   }
-};
-
-// You can keep this to fetch history for the user/admin
-export const getAllWithdrawals = async (req, res) => {
-  const withdrawals = await Withdrawal.find()
-    .populate("organizer", "name email")
-    .sort("-createdAt");
-
-  res.json(withdrawals);
 };
