@@ -6,50 +6,71 @@ import User from "../models/User.js";
 export const organizerDashboard = async (req, res) => {
   try {
     const organizerId = req.user.id;
-
-    /* ================= ORGANIZER PROFILE ================= */
-    const organizer =
-      await User.findById(organizerId).select("name email avatar");
-
-    /* ================= EVENTS ================= */
-    const events = await Event.find({ organizer: organizerId }).sort({
-      date: -1,
-    });
     const now = new Date();
+
+    // UPGRADE 1: Parallel data fetching & .lean() for raw JS performance
+    const [organizer, events, tickets, wallet] = await Promise.all([
+      User.findById(organizerId).select("name email avatar").lean(),
+      Event.find({ organizer: organizerId }).sort({ date: -1 }).lean(),
+      Ticket.find({ organizer: organizerId }).lean(),
+      Wallet.findOneAndUpdate(
+        { organizer: organizerId },
+        {
+          $setOnInsert: {
+            organizer: organizerId,
+            balance: 0,
+            totalEarnings: 0,
+          },
+        },
+        { upsert: true, new: true, setDefaultsOnInsert: true },
+      ).lean(),
+    ]);
+
+    // Basic event counts
     const totalEvents = events.length;
-    const upcoming = events.filter((e) => new Date(e.date) > now).length;
-    const live = events.filter((e) => e.status === "LIVE").length;
+    let upcoming = 0;
+    let live = 0;
+    events.forEach((e) => {
+      if (new Date(e.date) > now) upcoming++;
+      if (e.status === "LIVE") live++;
+    });
 
-    /* ================= TICKETS ================= */
-    const tickets = await Ticket.find({ organizer: organizerId });
-    const ticketsSold = tickets.length;
-    const revenue = tickets.reduce((sum, t) => sum + (t.amountPaid || 0), 0);
+    // UPGRADE 2: O(N) Hash Map for ticket stats (Performance Optimization)
+    let ticketsSold = 0;
+    let totalRevenue = 0;
+    const ticketStatsByEvent = {};
 
-    /* ================= WALLET ================= */
-    // ✅ upsert — never returns null, auto-creates for new organizers
-    const wallet = await Wallet.findOneAndUpdate(
-      { organizer: organizerId },
-      { $setOnInsert: { organizer: organizerId } },
-      { upsert: true, new: true },
-    );
+    tickets.forEach((t) => {
+      const eventId = String(t.event);
+      const paid = t.amountPaid || 0;
 
-    /* ================= EVENT MAP ================= */
+      ticketsSold++;
+      totalRevenue += paid;
+
+      if (!ticketStatsByEvent[eventId]) {
+        ticketStatsByEvent[eventId] = { sold: 0, revenue: 0 };
+      }
+      ticketStatsByEvent[eventId].sold += 1;
+      ticketStatsByEvent[eventId].revenue += paid;
+    });
+
+    // Map events to include calculated stats
     const eventStats = events.map((event) => {
-      const eventTickets = tickets.filter(
-        (t) => String(t.event) === String(event._id),
-      );
+      const stats = ticketStatsByEvent[String(event._id)] || {
+        sold: 0,
+        revenue: 0,
+      };
       return {
         _id: event._id,
         title: event.title,
         date: event.date,
         capacity: event.capacity,
-        sold: eventTickets.length,
+        sold: stats.sold,
         status: event.status,
-        revenue: eventTickets.reduce((sum, t) => sum + (t.amountPaid || 0), 0),
+        revenue: stats.revenue,
       };
     });
 
-    /* ================= RESPONSE ================= */
     return res.json({
       organizer: {
         name: organizer?.name || "Organizer",
@@ -59,16 +80,16 @@ export const organizerDashboard = async (req, res) => {
       stats: {
         events: totalEvents,
         ticketsSold,
-        revenue,
+        revenue: totalRevenue,
         upcoming,
         live,
-        walletBalance: wallet.balance, // ✅ always a number
-        totalEarnings: wallet.totalEarnings, // ✅ always a number
+        walletBalance: wallet?.balance || 0,
+        totalEarnings: wallet?.totalEarnings || 0,
       },
       events: eventStats,
     });
   } catch (error) {
     console.error("DASHBOARD ERROR:", error);
-    res.status(500).json({ message: "Dashboard failed" });
+    res.status(500).json({ message: "Failed to load unique organizer data." });
   }
 };
