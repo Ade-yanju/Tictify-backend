@@ -7,6 +7,10 @@ const router = express.Router();
  * ErcasPay Webhook
  * Called by payment gateway after payment
  */
-router.post("/ercaspay", handlePaymentWebhook);
+router.post(
+  "/webhook/paystack",
+  express.raw({ type: "application/json" }),
+  handlePaymentWebhook,
+);
 
 export default router;

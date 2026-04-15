@@ -1,107 +1,97 @@
 import crypto from "crypto";
 import mongoose from "mongoose";
 import QRCode from "qrcode";
-import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
+import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 
 /* =====================================================
-   ERCASPAY WEBHOOK — PRODUCTION SAFE
+   PAYSTACK WEBHOOK — PRODUCTION SAFE
 ===================================================== */
 export const handlePaymentWebhook = async (req, res) => {
   const session = await mongoose.startSession();
 
   try {
     /* ================= VERIFY SIGNATURE ================= */
-
-    const signature = req.headers["x-ercaspay-signature"];
+    const signature = req.headers["x-paystack-signature"];
 
     if (!signature) {
       return res.status(400).send("Missing signature");
     }
 
     const expectedSignature = crypto
-      .createHmac("sha512", process.env.ERCASPAY_WEBHOOK_SECRET)
-      .update(req.body) // raw buffer
+      .createHmac("sha512", process.env.PAYSTACK_SECRET_KEY)
+      .update(req.body) // raw buffer — must be raw, not parsed
       .digest("hex");
 
     if (signature !== expectedSignature) {
-      console.error("❌ Invalid ERCASPAY signature");
+      console.error("❌ Invalid Paystack signature");
       return res.status(401).send("Invalid signature");
     }
 
     const payload = JSON.parse(req.body.toString());
 
-    console.log("✅ ERCASPAY WEBHOOK:", payload);
-
-    const status = payload?.status || payload?.responseBody?.status;
-
-    if (status !== "SUCCESSFUL") {
+    // Only handle successful charge events
+    if (payload.event !== "charge.success") {
       return res.status(200).send("ignored");
     }
 
-    const reference =
-      payload?.paymentReference ||
-      payload?.tx_reference ||
-      payload?.responseBody?.paymentReference ||
-      payload?.responseBody?.tx_reference;
+    const reference = payload?.data?.reference;
 
-    if (!reference) {
-      console.error("❌ Missing reference");
+    if (!reference || !reference.startsWith("TICTIFY-")) {
+      console.error("❌ Missing or unrecognised reference");
       return res.status(200).send("ignored");
     }
+
+    console.log("✅ PAYSTACK WEBHOOK:", reference);
 
     /* =====================================================
-       🔥 START DB TRANSACTION
+       🔥 DB TRANSACTION
     ===================================================== */
-
     await session.withTransaction(async () => {
-      const payment = await Payment.findOne({ reference }).session(session);
+      /* ── Find payment ── */
+      let payment = await Payment.findOne({ reference }).session(session);
 
       if (!payment) {
-        console.error("❌ Payment not found:", reference);
-        return;
+        // Recover from webhook metadata if payment record is missing
+        console.warn("⚠️ Payment not found, recovering from webhook payload");
+        const meta = payload.data.metadata;
+        const fallbackEvent = await Event.findById(meta?.eventId).session(
+          session,
+        );
+
+        payment = await Payment.create(
+          [
+            {
+              reference,
+              event: meta?.eventId,
+              organizer: fallbackEvent?.organizer ?? null,
+              ticketType: meta?.ticketType,
+              email: payload.data.customer.email,
+              amount: payload.data.amount / 100,
+              platformFee: 0,
+              organizerAmount: payload.data.amount / 100,
+              status: "PENDING",
+              provider: "PAYSTACK",
+            },
+          ],
+          { session },
+        ).then((r) => r[0]);
       }
 
-      // 🔐 IDempotency guard (MOST IMPORTANT LINE)
+      /* ── Idempotency guard ── */
       if (payment.status === "SUCCESS") {
+        console.log("ℹ️ Already processed:", reference);
         return;
       }
 
-      /* ================= VERIFY WITH ERCASPAY ================= */
-
-      const verifyRes = await fetch(
-        `https://api.ercaspay.com/api/v1/payment/transaction/verify/${reference}`,
-        {
-          method: "GET",
-          headers: {
-            Authorization: `Bearer ${process.env.ERCASPAY_SECRET_KEY}`,
-            Accept: "application/json",
-          },
-        },
-      );
-
-      const verifyData = await verifyRes.json();
-
-      if (
-        verifyData?.requestSuccessful !== true ||
-        verifyData?.responseBody?.status !== "SUCCESSFUL"
-      ) {
-        console.error("❌ Verification failed:", reference);
-        return;
-      }
-
-      /* ================= MARK PAYMENT SUCCESS ================= */
-
+      /* ── Mark payment success ── */
       payment.status = "SUCCESS";
       payment.verifiedAt = new Date();
-      payment.gatewayResponse = verifyData;
-
       await payment.save({ session });
 
-      /* ================= CREATE TICKET ================= */
-
+      /* ── Create ticket if not already exists ── */
       const existingTicket = await Ticket.findOne({
         paymentRef: reference,
       }).session(session);
@@ -118,44 +108,54 @@ export const handlePaymentWebhook = async (req, res) => {
               buyerEmail: payment.email,
               qrCode,
               qrImage,
-              scanned: false,
+              ticketType: payment.ticketType,
               paymentRef: reference,
               amountPaid: payment.organizerAmount,
-              ticketType: payment.ticketType,
               currency: "NGN",
+              scanned: false,
             },
           ],
           { session },
         );
+
+        /* ── Update event capacity ── */
+        const event = await Event.findById(payment.event).session(session);
+        if (event) {
+          const ticketConfig = event.ticketTypes.find(
+            (t) => t.name === payment.ticketType,
+          );
+          if (ticketConfig) ticketConfig.sold += 1;
+
+          const totalSold = event.ticketTypes.reduce(
+            (sum, t) => sum + (t.sold || 0),
+            0,
+          );
+          if (totalSold >= event.capacity) event.status = "ENDED";
+
+          await event.save({ session });
+        }
+
+        /* ── Credit wallet ── */
+        let wallet = await Wallet.findOne({
+          organizer: payment.organizer,
+        }).session(session);
+
+        if (!wallet) {
+          wallet = await Wallet.create(
+            [{ organizer: payment.organizer, balance: 0, totalEarnings: 0 }],
+            { session },
+          ).then((r) => r[0]);
+        }
+
+        wallet.balance += payment.organizerAmount;
+        wallet.totalEarnings += payment.organizerAmount;
+        await wallet.save({ session });
+
+        console.log(`✅ Ticket + wallet credited via webhook: ${reference}`);
       }
-
-      /* ================= CREDIT WALLET ================= */
-
-      let wallet = await Wallet.findOne({
-        organizer: payment.organizer,
-      }).session(session);
-
-      if (!wallet) {
-        wallet = await Wallet.create(
-          [
-            {
-              organizer: payment.organizer,
-              balance: 0,
-              totalEarnings: 0,
-            },
-          ],
-          { session },
-        ).then((res) => res[0]);
-      }
-
-      wallet.balance += payment.organizerAmount;
-      wallet.totalEarnings += payment.organizerAmount;
-
-      await wallet.save({ session });
     });
 
     session.endSession();
-
     return res.status(200).send("processed");
   } catch (error) {
     session.endSession();

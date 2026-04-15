@@ -1,19 +1,22 @@
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
-import User from "../models/User.js"; // ← add this
+import User from "../models/User.js";
 
 export const organizerDashboard = async (req, res) => {
   try {
     const organizerId = req.user.id;
 
     /* ================= ORGANIZER PROFILE ================= */
-    const organizer = await User.findById(organizerId).select("name email avatar");
+    const organizer =
+      await User.findById(organizerId).select("name email avatar");
 
     /* ================= EVENTS ================= */
-    const events = await Event.find({ organizer: organizerId }).sort({ date: -1 });
-    const totalEvents = events.length;
+    const events = await Event.find({ organizer: organizerId }).sort({
+      date: -1,
+    });
     const now = new Date();
+    const totalEvents = events.length;
     const upcoming = events.filter((e) => new Date(e.date) > now).length;
     const live = events.filter((e) => e.status === "LIVE").length;
 
@@ -23,23 +26,26 @@ export const organizerDashboard = async (req, res) => {
     const revenue = tickets.reduce((sum, t) => sum + (t.amountPaid || 0), 0);
 
     /* ================= WALLET ================= */
-    const wallet = await Wallet.findOne({ organizer: organizerId });
+    // ✅ upsert — never returns null, auto-creates for new organizers
+    const wallet = await Wallet.findOneAndUpdate(
+      { organizer: organizerId },
+      { $setOnInsert: { organizer: organizerId } },
+      { upsert: true, new: true },
+    );
 
     /* ================= EVENT MAP ================= */
     const eventStats = events.map((event) => {
-      const sold = tickets.filter(
-        (t) => String(t.event) === String(event._id)
-      ).length;
+      const eventTickets = tickets.filter(
+        (t) => String(t.event) === String(event._id),
+      );
       return {
         _id: event._id,
         title: event.title,
         date: event.date,
         capacity: event.capacity,
-        sold,
+        sold: eventTickets.length,
         status: event.status,
-        revenue: tickets
-          .filter((t) => String(t.event) === String(event._id))
-          .reduce((sum, t) => sum + (t.amountPaid || 0), 0),
+        revenue: eventTickets.reduce((sum, t) => sum + (t.amountPaid || 0), 0),
       };
     });
 
@@ -56,8 +62,8 @@ export const organizerDashboard = async (req, res) => {
         revenue,
         upcoming,
         live,
-        walletBalance: wallet?.balance || 0,
-        totalEarnings: wallet?.totalEarnings || 0,
+        walletBalance: wallet.balance, // ✅ always a number
+        totalEarnings: wallet.totalEarnings, // ✅ always a number
       },
       events: eventStats,
     });
