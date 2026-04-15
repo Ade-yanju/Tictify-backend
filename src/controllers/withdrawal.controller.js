@@ -4,25 +4,24 @@ import WalletTransaction from "../models/WalletTransaction.js";
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
 
+/* ================= REQUEST WITHDRAWAL ================= */
 export const requestWithdrawal = async (req, res) => {
   const { amount, bankDetails } = req.body;
-  const userId = req.user.id; // Unified with your dashboard logic
+  const userId = req.user.id;
 
   try {
-    // 1. Fetch wallet and validate balance
     const wallet = await Wallet.findOne({ organizer: userId });
 
     if (!wallet || wallet.balance < amount) {
       return res.status(400).json({ message: "Insufficient wallet balance" });
     }
 
-    // 2. Immediate Deduction (Anti-fraud lock)
-    // We deduct first so they can't spam the "Submit" button
+    // 1. Immediate Deduction (Anti-fraud lock)
     wallet.balance -= amount;
     await wallet.save();
 
     try {
-      // 3. Create Paystack Recipient
+      // 2. Create Paystack Recipient
       const recipientResponse = await fetch(
         "https://api.paystack.co/transferrecipient",
         {
@@ -44,11 +43,10 @@ export const requestWithdrawal = async (req, res) => {
       const recipientData = await recipientResponse.json();
 
       if (!recipientData.status) {
-        // Log the exact message from Paystack to help debugging
         throw new Error(`Recipient Setup Failed: ${recipientData.message}`);
       }
 
-      // 4. Initiate Transfer
+      // 3. Initiate Transfer
       const transferResponse = await fetch("https://api.paystack.co/transfer", {
         method: "POST",
         headers: {
@@ -69,7 +67,7 @@ export const requestWithdrawal = async (req, res) => {
         throw new Error(`Transfer Failed: ${transferData.message}`);
       }
 
-      // 5. Log Success
+      // 4. Log Success
       wallet.totalWithdrawn = (wallet.totalWithdrawn || 0) + amount;
       await wallet.save();
 
@@ -106,5 +104,22 @@ export const requestWithdrawal = async (req, res) => {
     res
       .status(500)
       .json({ message: "Critical error during withdrawal processing." });
+  }
+};
+
+/* ================= GET ALL WITHDRAWALS (The Missing Export) ================= */
+export const getAllWithdrawals = async (req, res) => {
+  try {
+    const userId = req.user.id;
+
+    // Fetch withdrawals specifically for this organizer
+    const withdrawals = await Withdrawal.find({ organizer: userId }).sort({
+      createdAt: -1,
+    });
+
+    res.json(withdrawals);
+  } catch (error) {
+    console.error("FETCH WITHDRAWALS ERROR:", error);
+    res.status(500).json({ message: "Could not load withdrawal history." });
   }
 };
