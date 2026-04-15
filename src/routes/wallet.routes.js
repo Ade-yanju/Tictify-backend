@@ -1,6 +1,6 @@
 import express from "express";
 import { getWallet, withdraw } from "../controllers/wallet.controller.js";
-import { protect } from "../middleware/auth.middleware.js"; // your existing auth middleware
+//import { protect } from "../middleware/auth.middleware.js"; // your existing auth middleware
 
 const router = express.Router();
 
