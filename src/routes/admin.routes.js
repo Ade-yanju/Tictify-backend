@@ -11,7 +11,7 @@ import {
 
 import {
   getAllWithdrawals,
-  approveWithdrawal,
+  // approveWithdrawal, <--- DELETE THIS LINE
 } from "../controllers/withdrawal.controller.js";
 
 const router = express.Router();
@@ -29,13 +29,17 @@ router.get("/organizers", authenticate, adminOnly, getAdminOrganizers);
 router.get("/events", authenticate, adminOnly, getAdminEvents);
 
 /* ================= WITHDRAWALS ================= */
+// Keep this so admins can see the history of instant payouts
 router.get("/withdrawals", authenticate, adminOnly, getAllWithdrawals);
 
+// DELETE THIS ROUTE BELOW - It's no longer needed for instant payouts
+/*
 router.patch(
   "/withdrawals/:id/approve",
   authenticate,
   adminOnly,
   approveWithdrawal,
 );
+*/
 
 export default router;
