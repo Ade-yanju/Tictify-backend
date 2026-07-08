@@ -5,6 +5,15 @@ import nodemailer from "nodemailer";
 // Supports: Resend, SendGrid, Mailgun, SMTP
 // ============================================
 
+/* Placeholder values (e.g. "your_brevo_smtp_key") must count as NOT
+   configured — otherwise a half-filled .env block sits in front of a
+   working provider and every email burns a connection timeout first. */
+function configured(...values) {
+  return values.every(
+    (v) => v && !String(v).toLowerCase().includes("your_"),
+  );
+}
+
 const providers = {
   resend: createResendProvider,
   sendgrid: createSendGridProvider,
@@ -13,8 +22,7 @@ const providers = {
 };
 
 function createResendProvider() {
-  if (!process.env.RESEND_API_KEY) {
-    console.warn("⚠️  RESEND_API_KEY not configured");
+  if (!configured(process.env.RESEND_API_KEY)) {
     return null;
   }
 
@@ -45,8 +53,7 @@ function createResendProvider() {
 }
 
 function createSendGridProvider() {
-  if (!process.env.SENDGRID_API_KEY) {
-    console.warn("⚠️  SENDGRID_API_KEY not configured");
+  if (!configured(process.env.SENDGRID_API_KEY)) {
     return null;
   }
 
@@ -77,8 +84,7 @@ function createSendGridProvider() {
 }
 
 function createMailgunProvider() {
-  if (!process.env.MAILGUN_API_KEY || !process.env.MAILGUN_DOMAIN) {
-    console.warn("⚠️  MAILGUN_API_KEY or MAILGUN_DOMAIN not configured");
+  if (!configured(process.env.MAILGUN_API_KEY, process.env.MAILGUN_DOMAIN)) {
     return null;
   }
 
@@ -114,8 +120,13 @@ function createMailgunProvider() {
 }
 
 function createSMTPProvider() {
-  if (!process.env.SMTP_HOST || !process.env.SMTP_USER) {
-    console.warn("⚠️  SMTP configuration incomplete");
+  if (
+    !configured(
+      process.env.SMTP_HOST,
+      process.env.SMTP_USER,
+      process.env.SMTP_PASS,
+    )
+  ) {
     return null;
   }
 
