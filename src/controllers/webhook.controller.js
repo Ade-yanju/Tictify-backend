@@ -10,6 +10,80 @@ import { sendEmail } from "../services/email.service.js";
 const PUBLIC_API =
   process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
 
+/* ── Async payout verdicts from Paystack ──────────────────────
+   transfer.success  → confirm the withdrawal as PAID
+   transfer.failed / transfer.reversed → mark FAILED and return
+   the held money to the organizer's wallet (exactly once). */
+async function handleTransferEvent(payload, res) {
+  try {
+    const Withdrawal = (await import("../models/Withdrawal.js")).default;
+    const WalletTransaction = (await import("../models/WalletTransaction.js"))
+      .default;
+    const reference = payload?.data?.reference;
+    if (!reference) return res.status(200).send("ignored");
+
+    if (payload.event === "transfer.success") {
+      await Withdrawal.updateOne(
+        { paystackReference: reference },
+        { status: "PAID" },
+      );
+      console.log(`✅ Transfer confirmed: ${reference}`);
+      return res.status(200).send("processed");
+    }
+
+    if (
+      payload.event === "transfer.failed" ||
+      payload.event === "transfer.reversed"
+    ) {
+      /* Atomic claim: only flip PAID/APPROVED → FAILED once,
+         so a duplicate webhook can never double-refund */
+      const withdrawal = await Withdrawal.findOneAndUpdate(
+        {
+          paystackReference: reference,
+          status: { $in: ["PAID", "APPROVED"] },
+        },
+        {
+          status: "FAILED",
+          failureReason:
+            payload?.data?.reason ||
+            payload?.data?.gateway_response ||
+            payload.event,
+        },
+        { new: true },
+      );
+      if (!withdrawal) return res.status(200).send("ignored");
+
+      // Money never reached the organizer → give it back
+      await Wallet.updateOne(
+        { organizer: withdrawal.organizer },
+        {
+          $inc: {
+            balance: withdrawal.amount,
+            totalWithdrawn: -withdrawal.amount,
+          },
+        },
+        { upsert: true },
+      );
+
+      await WalletTransaction.create({
+        organizer: withdrawal.organizer,
+        type: "CREDIT",
+        amount: withdrawal.amount,
+        reference: `WD-TRANSFER-FAIL-${withdrawal._id}`,
+        description: `Bank transfer ${payload.event.split(".")[1]} — funds returned to wallet`,
+      });
+
+      console.warn(`⚠️ Transfer ${payload.event}: ${reference} — refunded`);
+      return res.status(200).send("processed");
+    }
+
+    return res.status(200).send("ignored");
+  } catch (err) {
+    console.error("TRANSFER WEBHOOK ERROR:", err);
+    return res.status(500).send("error");
+  }
+}
+
 /* ── Post-payment ticket email (non-blocking) ── */
 async function emailTicketToGuest(reference) {
   try {
@@ -87,6 +161,13 @@ export const handlePaymentWebhook = async (req, res) => {
     }
 
     const payload = JSON.parse(req.body.toString());
+
+    /* ── TRANSFER EVENTS (payouts are async — the final verdict
+       arrives here, possibly minutes after the API call) ── */
+    if (payload.event?.startsWith("transfer.")) {
+      session.endSession();
+      return handleTransferEvent(payload, res);
+    }
 
     // Only handle successful charge events
     if (payload.event !== "charge.success") {

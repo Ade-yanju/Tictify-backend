@@ -16,9 +16,11 @@ const withdrawalSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["PENDING", "APPROVED", "REJECTED", "PAID"],
+      enum: ["PENDING", "APPROVED", "REJECTED", "PAID", "FAILED"],
       default: "PENDING",
     },
+
+    failureReason: String, // set when Paystack reports transfer.failed/reversed
 
     bankDetails: {
       bankName: String,

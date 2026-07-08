@@ -1,10 +1,10 @@
 import Withdrawal from "../models/Withdrawal.js";
 import Wallet from "../models/Wallet.js";
 import WalletTransaction from "../models/WalletTransaction.js";
-
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
-const paystackConfigured =
-  PAYSTACK_SECRET_KEY && PAYSTACK_SECRET_KEY.startsWith("sk_");
+import {
+  payoutToBank,
+  paystackConfigured,
+} from "../services/paystack.service.js";
 
 /* ================= GET ALL WITHDRAWALS ================= */
 export const getAllWithdrawals = async (req, res) => {
@@ -52,48 +52,13 @@ export const approveWithdrawal = async (req, res) => {
     /* ── Automatic payout when Paystack is configured ── */
     if (paystackConfigured) {
       try {
-        const bd = withdrawal.bankDetails || {};
-        const recipientRes = await fetch(
-          "https://api.paystack.co/transferrecipient",
-          {
-            method: "POST",
-            headers: {
-              Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-              "Content-Type": "application/json",
-            },
-            body: JSON.stringify({
-              type: "nuban",
-              name: bd.accountName,
-              account_number: bd.accountNumber,
-              bank_code: bd.bankCode,
-              currency: "NGN",
-            }),
-          },
-        );
-        const recipient = await recipientRes.json();
-        if (!recipient.status) {
-          throw new Error(recipient.message || "Recipient setup failed");
-        }
-
-        const transferRes = await fetch("https://api.paystack.co/transfer", {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            source: "balance",
-            amount: withdrawal.amount * 100, // kobo
-            recipient: recipient.data.recipient_code,
-            reason: `Tictify payout — ${bd.accountName}`,
-          }),
+        const payout = await payoutToBank({
+          amount: withdrawal.amount,
+          bankDetails: withdrawal.bankDetails || {},
+          reason: `Tictify payout — ${withdrawal.bankDetails?.accountName}`,
         });
-        const transfer = await transferRes.json();
-        if (!transfer.status) {
-          throw new Error(transfer.message || "Transfer failed");
-        }
 
-        paystackReference = transfer.data.reference;
+        paystackReference = payout.reference;
         withdrawal.status = "PAID";
         withdrawal.paystackReference = paystackReference;
         await withdrawal.save();

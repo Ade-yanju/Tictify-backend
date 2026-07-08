@@ -1,7 +1,10 @@
 import Withdrawal from "../models/Withdrawal.js";
 import Wallet from "../models/Wallet.js";
 import WalletTransaction from "../models/WalletTransaction.js";
-import crypto from "crypto";
+import {
+  payoutToBank,
+  paystackConfigured,
+} from "../services/paystack.service.js";
 
 const MIN_WITHDRAWAL = 500; // ₦
 const MAX_WITHDRAWAL = 5_000_000; // ₦ sanity ceiling per request
@@ -94,8 +97,48 @@ export const requestWithdrawal = async (req, res) => {
       type: "DEBIT",
       amount,
       reference: `WD-HOLD-${withdrawal._id}`,
-      description: `Withdrawal request — funds held pending admin approval (${bankName} ····${accountNumber.slice(-4)})`,
+      description: `Withdrawal request — funds held pending payout (${bankName} ····${accountNumber.slice(-4)})`,
     });
+
+    /* ── 6. INSTANT PAYOUT MODE (AUTO_APPROVE_WITHDRAWALS=true) ──
+       Funds are already held, so a failed transfer costs nothing:
+       the request simply stays PENDING for admin review. */
+    if (process.env.AUTO_APPROVE_WITHDRAWALS === "true" && paystackConfigured) {
+      try {
+        const payout = await payoutToBank({
+          amount,
+          bankDetails: { bankName, bankCode, accountNumber, accountName },
+          reason: `Tictify payout — ${accountName}`,
+        });
+
+        withdrawal.status = "PAID";
+        withdrawal.paystackReference = payout.reference;
+        withdrawal.approvedAt = new Date();
+        await withdrawal.save();
+
+        await Wallet.updateOne(
+          { organizer: userId },
+          { $inc: { totalWithdrawn: amount } },
+        );
+
+        await WalletTransaction.create({
+          organizer: userId,
+          type: "DEBIT",
+          amount,
+          reference: payout.reference,
+          description: "Instant payout via Paystack",
+        });
+
+        return res.status(200).json({
+          message: "Payout initiated! Funds are on the way to your bank.",
+          withdrawal,
+          newBalance: wallet.balance,
+        });
+      } catch (paystackErr) {
+        // Payout couldn't start — funds stay safely held for admin review
+        console.error("AUTO PAYOUT FAILED:", paystackErr.message);
+      }
+    }
 
     return res.status(201).json({
       message:
