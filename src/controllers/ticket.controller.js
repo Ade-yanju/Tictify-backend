@@ -3,7 +3,201 @@ import mongoose from "mongoose";
 import QRCode from "qrcode";
 import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
+import Payment from "../models/Payment.js";
 import { sendEmail } from "../services/email.service.js";
+
+/* =====================================================
+   🚪 LIVE GATE STATS — admitted vs sold, polled during
+   the event by the scanner page (organizer only)
+===================================================== */
+export const getGateStats = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const event = await Event.findById(eventId);
+    if (!event || event.organizer.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const agg = await Ticket.aggregate([
+      { $match: { event: event._id } },
+      {
+        $group: {
+          _id: null,
+          ticketsSold: { $sum: 1 },
+          guestsExpected: { $sum: { $ifNull: ["$groupSize", 1] } },
+          guestsAdmitted: { $sum: { $ifNull: ["$admittedCount", 0] } },
+        },
+      },
+    ]);
+
+    const s = agg[0] || { ticketsSold: 0, guestsExpected: 0, guestsAdmitted: 0 };
+    return res.json({
+      eventTitle: event.title,
+      ticketsSold: s.ticketsSold,
+      guestsExpected: s.guestsExpected,
+      guestsAdmitted: s.guestsAdmitted,
+      guestsRemaining: Math.max(0, s.guestsExpected - s.guestsAdmitted),
+    });
+  } catch (err) {
+    console.error("GATE STATS ERROR:", err);
+    return res.status(500).json({ message: "Failed to load gate stats" });
+  }
+};
+
+/* =====================================================
+   📣 PROMOTER LEADERBOARD — sales per ?ref= code
+   (organizer only, per event)
+===================================================== */
+export const getPromoterStats = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const event = await Event.findById(eventId);
+    if (!event || event.organizer.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const promoters = await Payment.aggregate([
+      {
+        $match: {
+          event: event._id,
+          status: "SUCCESS",
+          promoter: { $exists: true, $nin: [null, ""] },
+        },
+      },
+      {
+        $group: {
+          _id: "$promoter",
+          ticketsSold: { $sum: 1 },
+          revenue: { $sum: "$organizerAmount" },
+        },
+      },
+      { $sort: { ticketsSold: -1 } },
+      { $limit: 50 },
+    ]);
+
+    const direct = await Payment.countDocuments({
+      event: event._id,
+      status: "SUCCESS",
+      $or: [{ promoter: { $exists: false } }, { promoter: null }, { promoter: "" }],
+    });
+
+    return res.json({
+      eventTitle: event.title,
+      promoters: promoters.map((p) => ({
+        code: p._id,
+        ticketsSold: p.ticketsSold,
+        revenue: p.revenue,
+      })),
+      directSales: direct,
+    });
+  } catch (err) {
+    console.error("PROMOTER STATS ERROR:", err);
+    return res.status(500).json({ message: "Failed to load promoter stats" });
+  }
+};
+
+/* =====================================================
+   📋 GUEST LIST EXPORT — CSV download (organizer only)
+===================================================== */
+export const exportGuestList = async (req, res) => {
+  try {
+    const { eventId } = req.params;
+    const event = await Event.findById(eventId);
+    if (!event || event.organizer.toString() !== req.user._id.toString()) {
+      return res.status(403).json({ message: "Access denied" });
+    }
+
+    const tickets = await Ticket.find({ event: event._id }).sort({ createdAt: 1 });
+
+    const esc = (v) => `"${String(v ?? "").replace(/"/g, '""')}"`;
+    const rows = [
+      ["Email", "Ticket Type", "Admits", "Admitted", "Status", "Reference", "Purchased"].join(","),
+      ...tickets.map((t) =>
+        [
+          esc(t.buyerEmail),
+          esc(t.ticketType),
+          t.groupSize || 1,
+          t.admittedCount || 0,
+          t.scanned ? "USED" : "VALID",
+          esc(t.paymentRef),
+          esc(t.createdAt?.toISOString?.() || ""),
+        ].join(","),
+      ),
+    ];
+
+    res.setHeader("Content-Type", "text/csv; charset=utf-8");
+    res.setHeader(
+      "Content-Disposition",
+      `attachment; filename="guestlist-${event.title.replace(/[^a-z0-9]/gi, "-").slice(0, 40)}.csv"`,
+    );
+    return res.send(rows.join("\n"));
+  } catch (err) {
+    console.error("GUEST EXPORT ERROR:", err);
+    return res.status(500).json({ message: "Export failed" });
+  }
+};
+
+/* =====================================================
+   👛 TICKET WALLET — guest enters their email, we email
+   every ticket they own (no enumeration: same response
+   whether or not tickets exist)
+===================================================== */
+export const emailMyTickets = async (req, res) => {
+  const neutral = {
+    message:
+      "If any tickets are linked to that email, they're on their way to your inbox.",
+  };
+
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: "A valid email is required" });
+    }
+
+    const tickets = await Ticket.find({ buyerEmail: email })
+      .populate("event", "title date location")
+      .sort({ createdAt: -1 })
+      .limit(20);
+
+    if (tickets.length > 0) {
+      const rows = tickets
+        .map((t) => {
+          const ev = t.event || {};
+          const when = ev.date ? new Date(ev.date).toDateString() : "—";
+          const admits =
+            (t.groupSize || 1) > 1 ? ` · admits ${t.groupSize}` : "";
+          return `
+            <div style="background:#fff;padding:16px 20px;border-radius:12px;margin:10px 0;border-left:4px solid #E8C96A;">
+              <p style="margin:0 0 4px;font-weight:bold;">${ev.title || "Event"}</p>
+              <p style="margin:0 0 10px;color:#666;font-size:13px;">${when} · ${ev.location || ""} · ${t.ticketType || "Ticket"}${admits}</p>
+              <a href="${process.env.FRONTEND_URL}/success/${t.paymentRef}"
+                 style="display:inline-block;background:#E8C96A;color:#000;padding:9px 18px;border-radius:50px;text-decoration:none;font-weight:bold;font-size:13px;">
+                Open ticket & QR code
+              </a>
+            </div>`;
+        })
+        .join("");
+
+      sendEmail({
+        to: email,
+        subject: `Your Tictify wallet — ${tickets.length} ticket${tickets.length > 1 ? "s" : ""} 🎟️`,
+        html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;background:#f9fafb;border-radius:16px;">
+            <h2 style="color:#1a1a1a;margin-top:0;">Your tickets, all in one place</h2>
+            <p style="color:#666;">Here's everything linked to ${email}:</p>
+            ${rows}
+            <p style="font-size:12px;color:#999;margin-top:26px;">Show the QR code at the entrance — no printing needed. © ${new Date().getFullYear()} Tictify.</p>
+          </div>
+        `,
+      }).catch((err) => console.error("Wallet email failed:", err.message));
+    }
+
+    return res.json(neutral);
+  } catch (err) {
+    console.error("MY TICKETS ERROR:", err);
+    return res.json(neutral);
+  }
+};
 
 /* =====================================================
    📧 SEND TICKET EMAIL (multi-provider: Brevo/Gmail SMTP,
@@ -103,6 +297,8 @@ export const getTicketByReference = async (req, res) => {
         ticketType: ticket.ticketType,
         qrImage: ticket.qrImage,
         buyerEmail: ticket.buyerEmail,
+        groupSize: ticket.groupSize || 1,
+        admittedCount: ticket.admittedCount || 0,
       },
     });
   } catch (err) {

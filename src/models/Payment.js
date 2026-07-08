@@ -42,9 +42,20 @@ const paymentSchema = new mongoose.Schema(
       default: 0,
     },
 
+    processingFee: {
+      type: Number, // Paystack's cut — paid by the guest, not the organizer
+      default: 0,
+    },
+
     organizerAmount: {
       type: Number,
       default: 0,
+    },
+
+    promoter: {
+      type: String, // promoter code from a shared ?ref= link
+      trim: true,
+      index: true,
     },
 
     reference: {

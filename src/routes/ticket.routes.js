@@ -6,6 +6,10 @@ import {
   scanTicketController,
   createFreeTicket,
   sendTicketViaEmail,
+  getGateStats,
+  getPromoterStats,
+  exportGuestList,
+  emailMyTickets,
 } from "../controllers/ticket.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
@@ -24,6 +28,7 @@ const emailLimiter = rateLimit({
 /* ========= PUBLIC ========= */
 router.get("/by-reference/:reference", getTicketByReference);
 router.post("/send-email", emailLimiter, sendTicketViaEmail);
+router.post("/my-tickets", emailLimiter, emailMyTickets);
 
 /* ========= ORGANIZER ========= */
 router.get(
@@ -42,5 +47,10 @@ router.post(
 
 /* Complimentary tickets: organizers only (was an open, unauthenticated mint) */
 router.post("/free", authenticate, authorize("organizer"), createFreeTicket);
+
+/* Live gate dashboard + promoter leaderboard + guest list */
+router.get("/gate/:eventId", authenticate, authorize("organizer"), getGateStats);
+router.get("/promoters/:eventId", authenticate, authorize("organizer"), getPromoterStats);
+router.get("/export/:eventId", authenticate, authorize("organizer"), exportGuestList);
 
 export default router;

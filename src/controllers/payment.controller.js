@@ -7,11 +7,54 @@ import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 
 /* =====================================================
+   FEES
+   - Platform fee (Tictify): 3% + ₦80 — funds the product
+   - Processing fee (Paystack): 1.5% + ₦100 (₦100 waived
+     under ₦2,500), capped at ₦2,000 — paid by the GUEST
+     so the organizer always receives the full ticket price.
+===================================================== */
+export function computeFees(ticketPrice) {
+  const platformFee = Math.round(ticketPrice * 0.03 + 80);
+  const base = ticketPrice + platformFee;
+  let processingFee = Math.round(base * 0.015) + (base >= 2500 ? 100 : 0);
+  processingFee = Math.min(processingFee, 2000);
+  return {
+    ticketPrice,
+    platformFee,
+    processingFee,
+    total: ticketPrice + platformFee + processingFee,
+  };
+}
+
+/* Public quote — checkout shows this exact breakdown */
+export const quoteFees = async (req, res) => {
+  try {
+    const price = Number(req.query.price);
+    if (!Number.isFinite(price) || price < 0) {
+      return res.status(400).json({ message: "Invalid price" });
+    }
+    if (price === 0) {
+      return res.json({ ticketPrice: 0, platformFee: 0, processingFee: 0, total: 0 });
+    }
+    return res.json(computeFees(Math.round(price)));
+  } catch {
+    return res.status(500).json({ message: "Quote failed" });
+  }
+};
+
+/* Promoter codes ride along on shared links (?ref=CODE) */
+function sanitizePromoter(raw) {
+  const code = String(raw || "").trim().toUpperCase();
+  return /^[A-Z0-9_-]{2,30}$/.test(code) ? code : undefined;
+}
+
+/* =====================================================
    INITIATE PAYMENT (FREE OR PAYSTACK)
 ===================================================== */
 export const initiatePayment = async (req, res) => {
   try {
     const { eventId, ticketType, email, name } = req.body;
+    const promoter = sanitizePromoter(req.body.promoter);
 
     if (!eventId || !ticketType || !email || !name) {
       return res.status(400).json({ message: "Missing required fields" });
@@ -80,6 +123,7 @@ export const initiatePayment = async (req, res) => {
         amount: 0,
         platformFee: 0,
         organizerAmount: 0,
+        promoter,
         status: "SUCCESS",
         provider: "FREE",
       });
@@ -106,8 +150,9 @@ export const initiatePayment = async (req, res) => {
     }
 
     /* ================= PAID EVENT (PAYSTACK) ================= */
-    const platformFee = Math.round(ticketPrice * 0.03 + 80);
-    const totalAmount = ticketPrice + platformFee;
+    const fees = computeFees(ticketPrice);
+    const platformFee = fees.platformFee;
+    const totalAmount = fees.total;
 
     await Payment.create({
       reference,
@@ -117,7 +162,9 @@ export const initiatePayment = async (req, res) => {
       email,
       amount: totalAmount,
       platformFee,
+      processingFee: fees.processingFee,
       organizerAmount: ticketPrice,
+      promoter,
       status: "PENDING",
       provider: "PAYSTACK",
     });
