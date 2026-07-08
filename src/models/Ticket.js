@@ -74,6 +74,10 @@ const ticketSchema = new mongoose.Schema(
     scannedAt: {
       type: Date,
     },
+
+    emailedAt: {
+      type: Date, // set once any provider confirms delivery of the ticket email
+    },
   },
   { timestamps: true },
 );

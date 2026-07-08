@@ -44,7 +44,16 @@ async function emailTicketToGuest(reference) {
           <p style="font-size:12px;color:#999;margin-top:26px;">© ${new Date().getFullYear()} Tictify. No printing needed — your phone is your ticket.</p>
         </div>
       `,
-    }).catch((err) => console.error("Ticket email failed:", err.message));
+    })
+      .then((result) => {
+        if (result?.success) {
+          return Ticket.updateOne(
+            { paymentRef: reference },
+            { emailedAt: new Date() },
+          );
+        }
+      })
+      .catch((err) => console.error("Ticket email failed:", err.message));
   } catch (err) {
     console.error("Ticket email lookup failed:", err.message);
   }

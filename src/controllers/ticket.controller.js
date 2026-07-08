@@ -261,9 +261,16 @@ export const sendTicketViaEmail = async (req, res) => {
 
     if (result?.success === false) {
       return res.status(502).json({
-        message: "Email provider not configured or rejected the request",
+        emailUnavailable: true,
+        message:
+          "Email delivery is unstable right now — please download your ticket instead. It works exactly the same at the gate.",
       });
     }
+
+    await Ticket.updateOne(
+      { paymentRef: reference },
+      { emailedAt: new Date() },
+    );
 
     return res.json({ success: true, message: "Email delivered successfully." });
   } catch (error) {
@@ -299,6 +306,7 @@ export const getTicketByReference = async (req, res) => {
         buyerEmail: ticket.buyerEmail,
         groupSize: ticket.groupSize || 1,
         admittedCount: ticket.admittedCount || 0,
+        emailed: Boolean(ticket.emailedAt),
       },
     });
   } catch (err) {

@@ -116,7 +116,16 @@ export const paymentSuccess = async (req, res) => {
             </p>
           </div>
         `,
-      }).catch((err) => console.error("Ticket email failed:", err.message));
+      })
+        .then((result) => {
+          if (result?.success) {
+            return Ticket.updateOne(
+              { paymentRef: payment.reference },
+              { emailedAt: new Date() },
+            );
+          }
+        })
+        .catch((err) => console.error("Ticket email failed:", err.message));
     } catch (emailErr) {
       console.error("Email sending error:", emailErr.message);
     }

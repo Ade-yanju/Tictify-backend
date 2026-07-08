@@ -127,6 +127,10 @@ function createSMTPProvider() {
       user: process.env.SMTP_USER,
       pass: process.env.SMTP_PASS,
     },
+    // A dead SMTP host must fail fast so the chain can move on
+    connectionTimeout: 8000,
+    greetingTimeout: 8000,
+    socketTimeout: 10000,
   });
 
   return {
@@ -142,47 +146,94 @@ function createSMTPProvider() {
   };
 }
 
-// Get active provider based on priority
-function getProvider() {
-  const priority = process.env.EMAIL_PROVIDER || "resend";
-  const selectedProvider = providers[priority]?.();
+/* =====================================================
+   FAILOVER CHAIN
+   Every configured provider is tried in order (the one
+   named in EMAIL_PROVIDER first). A provider that fails
+   — quota exhausted, auth error, network — is put on a
+   10-minute cooldown so busy sends skip straight to the
+   next healthy provider. sendEmail NEVER throws: it
+   returns { success:false } when the whole chain fails,
+   so callers can offer the download fallback.
+===================================================== */
 
-  if (selectedProvider) {
-    console.log(`✅ Using ${selectedProvider.name} for emails`);
-    return selectedProvider;
+const COOLDOWN_MS = 10 * 60 * 1000;
+const cooldowns = new Map(); // provider key → timestamp until which it's skipped
+
+function getProviderChain() {
+  const preferred = process.env.EMAIL_PROVIDER || "smtp";
+  const order = [preferred, ...Object.keys(providers).filter((k) => k !== preferred)];
+
+  const chain = [];
+  for (const key of order) {
+    const provider = providers[key]?.();
+    if (provider) chain.push({ key, ...provider });
   }
-
-  // Fallback to any available provider
-  for (const [key, factory] of Object.entries(providers)) {
-    const provider = factory();
-    if (provider) {
-      console.log(`✅ Falling back to ${provider.name} for emails`);
-      return provider;
-    }
-  }
-
-  console.warn("⚠️  No email provider configured. Emails will be logged only.");
-  return null;
+  return chain;
 }
 
-// Export send function
-export async function sendEmail({ to, subject, html }) {
-  const provider = getProvider();
+// Backwards-compatible single-provider getter
+function getProvider() {
+  return getProviderChain()[0] || null;
+}
 
-  if (!provider) {
+export async function sendEmail({ to, subject, html }) {
+  const chain = getProviderChain();
+
+  if (chain.length === 0) {
     console.log(`📧 [NO PROVIDER] Email to ${to}: ${subject}`);
     return { success: false, message: "No email provider configured" };
   }
 
-  try {
-    const result = await provider.send({ to, subject, html });
-    console.log(`✅ [${provider.name}] Email sent to ${to}`);
-    return { success: true, provider: provider.name, result };
-  } catch (error) {
-    console.error(`❌ [${provider.name}] Failed to send to ${to}:`, error.message);
-    throw error;
+  const now = Date.now();
+  const errors = [];
+
+  // Hard deadlines: no single provider may hang the request, and the
+  // whole chain answers within ~20s so guests aren't left waiting.
+  const PER_PROVIDER_TIMEOUT_MS = 10_000;
+  const CHAIN_DEADLINE = Date.now() + 20_000;
+  const withTimeout = (promise, ms) =>
+    Promise.race([
+      promise,
+      new Promise((_, reject) =>
+        setTimeout(() => reject(new Error(`timed out after ${ms}ms`)), ms),
+      ),
+    ]);
+
+  // Healthy providers first, cooled-down ones as a last resort
+  const healthy = chain.filter((p) => (cooldowns.get(p.key) || 0) <= now);
+  const coolingDown = chain.filter((p) => (cooldowns.get(p.key) || 0) > now);
+
+  for (const provider of [...healthy, ...coolingDown]) {
+    if (Date.now() > CHAIN_DEADLINE) {
+      errors.push("chain deadline reached");
+      break;
+    }
+    try {
+      const result = await withTimeout(
+        provider.send({ to, subject, html }),
+        PER_PROVIDER_TIMEOUT_MS,
+      );
+      cooldowns.delete(provider.key);
+      console.log(`✅ [${provider.name}] Email sent to ${to}`);
+      return { success: true, provider: provider.name, result };
+    } catch (error) {
+      cooldowns.set(provider.key, Date.now() + COOLDOWN_MS);
+      errors.push(`${provider.name}: ${error.message}`);
+      console.error(
+        `❌ [${provider.name}] Failed (trying next provider):`,
+        error.message,
+      );
+    }
   }
+
+  console.error(`🚨 ALL EMAIL PROVIDERS FAILED for ${to} — ${errors.join(" | ")}`);
+  return {
+    success: false,
+    message: "All email providers failed",
+    errors,
+  };
 }
 
 // Export for testing/debugging
-export { providers, getProvider };
+export { providers, getProvider, getProviderChain };
