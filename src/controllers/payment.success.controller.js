@@ -6,6 +6,9 @@ import Event from "../models/Event.js";
 import QRCode from "qrcode";
 import { sendEmail } from "../services/email.service.js";
 
+const PUBLIC_API =
+  process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
+
 export const paymentSuccess = async (req, res) => {
   try {
     const { ref } = req.query;
@@ -100,7 +103,7 @@ export const paymentSuccess = async (req, res) => {
 
             <div style="background:#f5f5f5;padding:20px;border-radius:12px;text-align:center;margin:24px 0;">
               <p style="color:#666;margin:0 0 12px 0;font-size:12px;">Your QR Code:</p>
-              <img src="${ticket.qrImage}" alt="Ticket QR" style="width:200px;height:200px;" />
+              <img src="${PUBLIC_API}/api/tickets/qr/${payment.reference}" alt="Ticket QR" width="200" height="200" style="width:200px;height:200px;display:inline-block;" />
             </div>
 
             <p style="color:#999;font-size:12px;">

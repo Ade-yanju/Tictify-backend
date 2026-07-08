@@ -10,6 +10,7 @@ import {
   getPromoterStats,
   exportGuestList,
   emailMyTickets,
+  getTicketQrImage,
 } from "../controllers/ticket.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
@@ -27,6 +28,7 @@ const emailLimiter = rateLimit({
 
 /* ========= PUBLIC ========= */
 router.get("/by-reference/:reference", getTicketByReference);
+router.get("/qr/:reference", getTicketQrImage); // email clients block data-URIs
 router.post("/send-email", emailLimiter, sendTicketViaEmail);
 router.post("/my-tickets", emailLimiter, emailMyTickets);
 

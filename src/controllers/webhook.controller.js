@@ -7,6 +7,9 @@ import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 import { sendEmail } from "../services/email.service.js";
 
+const PUBLIC_API =
+  process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
+
 /* ── Post-payment ticket email (non-blocking) ── */
 async function emailTicketToGuest(reference) {
   try {
@@ -35,7 +38,7 @@ async function emailTicketToGuest(reference) {
           </div>
           <div style="text-align:center;background:#fff;padding:20px;border-radius:12px;margin:20px 0;">
             <p style="font-size:12px;color:#888;margin:0 0 10px;">Show this QR code at the entrance</p>
-            <img src="${ticket.qrImage}" alt="Ticket QR" style="width:200px;height:200px;" />
+            <img src="${PUBLIC_API}/api/tickets/qr/${reference}" alt="Ticket QR" width="200" height="200" style="width:200px;height:200px;display:inline-block;" />
           </div>
           <a href="${process.env.FRONTEND_URL}/success/${reference}"
              style="display:inline-block;background:#E8C96A;color:#000;padding:13px 26px;text-decoration:none;border-radius:50px;font-weight:bold;">

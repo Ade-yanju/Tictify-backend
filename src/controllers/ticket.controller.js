@@ -6,6 +6,11 @@ import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import { sendEmail } from "../services/email.service.js";
 
+/* Public base URL of THIS backend — used for QR image links in emails
+   (email clients block base64 data-URI images) */
+const PUBLIC_API =
+  process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
+
 /* =====================================================
    🚪 LIVE GATE STATS — admitted vs sold, polled during
    the event by the scanner page (organizer only)
@@ -240,14 +245,10 @@ export const sendTicketViaEmail = async (req, res) => {
              <p style="margin: 4px 0;"><strong>Location:</strong> ${ticket.event.location}</p>
              <p style="margin: 4px 0;"><strong>Reference:</strong> <code style="color: #B8952E;">${reference}</code></p>
           </div>
-          ${
-            ticket.qrImage
-              ? `<div style="text-align:center;background:#f8f9fa;padding:20px;border-radius:12px;margin:24px 0;">
-                   <p style="font-size:12px;color:#888;margin:0 0 10px;">Show this QR code at the entrance</p>
-                   <img src="${ticket.qrImage}" alt="Ticket QR" style="width:200px;height:200px;" />
-                 </div>`
-              : ""
-          }
+          <div style="text-align:center;background:#f8f9fa;padding:20px;border-radius:12px;margin:24px 0;">
+            <p style="font-size:12px;color:#888;margin:0 0 10px;">Show this QR code at the entrance</p>
+            <img src="${PUBLIC_API}/api/tickets/qr/${reference}" alt="Ticket QR" width="200" height="200" style="width:200px;height:200px;display:inline-block;" />
+          </div>
           <a href="${process.env.FRONTEND_URL}/success/${reference}"
              style="display: inline-block; background: #E8C96A; color: #000; padding: 14px 28px; text-decoration: none; border-radius: 50px; font-weight: bold; text-align: center;">
              Access Your QR Code
@@ -276,6 +277,32 @@ export const sendTicketViaEmail = async (req, res) => {
   } catch (error) {
     console.error("CRITICAL EMAIL SYSTEM ERROR:", error);
     return res.status(500).json({ message: "Internal server failure." });
+  }
+};
+
+/* =====================================================
+   🖼️ QR IMAGE AS A REAL URL
+   Gmail/Outlook strip base64 data-URI images from emails,
+   so ticket emails point at this endpoint instead.
+===================================================== */
+export const getTicketQrImage = async (req, res) => {
+  try {
+    const { reference } = req.params;
+    const ticket = await Ticket.findOne({ paymentRef: reference });
+    if (!ticket || !ticket.qrCode) return res.status(404).send("Not found");
+
+    const png = await QRCode.toBuffer(ticket.qrCode, {
+      type: "png",
+      width: 400,
+      margin: 2,
+    });
+
+    res.setHeader("Content-Type", "image/png");
+    res.setHeader("Cache-Control", "public, max-age=86400, immutable");
+    return res.send(png);
+  } catch (err) {
+    console.error("QR IMAGE ERROR:", err);
+    return res.status(500).send("QR unavailable");
   }
 };
 
