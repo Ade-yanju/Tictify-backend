@@ -1,7 +1,14 @@
+# Dependencies
 node_modules/
-.env
-.env.local
-.env.production
-dist/
-build/
 
+# Environment secrets — never commit
+.env
+.env.*
+!.env.example
+
+# Logs
+*.log
+npm-debug.log*
+
+# OS
+.DS_Store

@@ -22,20 +22,21 @@ const app = express();
 
 /* ================= CORS ================= */
 const allowedOrigins = [
-  "http://localhost:5173",
   "https://tictify.vercel.app",
   "https://www.tictify.ng",
 ];
+// Any localhost/127.0.0.1 port is allowed in development
+const localhostRegex = /^http:\/\/(localhost|127\.0\.0\.1):\d+$/;
 
 app.use(
   cors({
     origin: (origin, callback) => {
       if (!origin) return callback(null, true);
-      if (allowedOrigins.includes(origin)) {
-        callback(null, true);
-      } else {
-        callback(new Error("CORS not allowed"));
+      if (localhostRegex.test(origin) || allowedOrigins.includes(origin)) {
+        return callback(null, true);
       }
+      // Disallow without throwing — the browser blocks it, the server stays quiet
+      return callback(null, false);
     },
     credentials: true,
   }),

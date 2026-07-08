@@ -1,30 +1,12 @@
-import nodemailer from "nodemailer";
+import { sendEmail as sendViaProvider } from "./emailProviders.service.js";
 
-/**
- * ===============================
- * EMAIL TRANSPORTER
- * ===============================
- */
-const transporter = nodemailer.createTransport({
-  host: process.env.SMTP_HOST,
-  port: process.env.SMTP_PORT,
-  secure: false,
-  auth: {
-    user: process.env.SMTP_USER,
-    pass: process.env.SMTP_PASS,
-  },
-});
-
-/**
- * ===============================
- * SEND EMAIL (NAMED EXPORT)
- * ===============================
- */
+// Main export - uses configured email provider
 export async function sendEmail({ to, subject, html }) {
-  await transporter.sendMail({
-    from: `"Tictify" <${process.env.SMTP_USER}>`,
-    to,
-    subject,
-    html,
-  });
+  try {
+    return await sendViaProvider({ to, subject, html });
+  } catch (error) {
+    console.error("Email service error:", error.message);
+    // Don't throw - allow app to continue even if email fails
+    return { success: false, error: error.message };
+  }
 }
