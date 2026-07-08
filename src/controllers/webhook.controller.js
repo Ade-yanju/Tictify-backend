@@ -5,6 +5,50 @@ import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
+import { sendEmail } from "../services/email.service.js";
+
+/* ── Post-payment ticket email (non-blocking) ── */
+async function emailTicketToGuest(reference) {
+  try {
+    const ticket = await Ticket.findOne({ paymentRef: reference }).populate("event");
+    if (!ticket || !ticket.buyerEmail) return;
+
+    const ev = ticket.event || {};
+    const groupNote =
+      (ticket.groupSize || 1) > 1
+        ? `<p style="margin:4px 0;"><strong>Admits:</strong> ${ticket.groupSize} guests on one QR code</p>`
+        : "";
+
+    sendEmail({
+      to: ticket.buyerEmail,
+      subject: `Your Ticket for ${ev.title || "your event"} is Ready! 🎟️`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;border:1px solid #eee;border-radius:16px;background:#fafafa;">
+          <h2 style="color:#1a1a1a;margin-top:0;">Payment confirmed — you're going! ✅</h2>
+          <div style="background:#fff;padding:20px;border-radius:12px;margin:20px 0;border-left:4px solid #E8C96A;">
+            <p style="margin:4px 0;"><strong>Event:</strong> ${ev.title || "—"}</p>
+            <p style="margin:4px 0;"><strong>Date:</strong> ${ev.date ? new Date(ev.date).toDateString() : "—"}</p>
+            <p style="margin:4px 0;"><strong>Location:</strong> ${ev.location || "—"}</p>
+            <p style="margin:4px 0;"><strong>Ticket:</strong> ${ticket.ticketType || "—"}</p>
+            ${groupNote}
+            <p style="margin:12px 0 0;font-size:12px;color:#888;"><strong>Reference:</strong> ${reference}</p>
+          </div>
+          <div style="text-align:center;background:#fff;padding:20px;border-radius:12px;margin:20px 0;">
+            <p style="font-size:12px;color:#888;margin:0 0 10px;">Show this QR code at the entrance</p>
+            <img src="${ticket.qrImage}" alt="Ticket QR" style="width:200px;height:200px;" />
+          </div>
+          <a href="${process.env.FRONTEND_URL}/success/${reference}"
+             style="display:inline-block;background:#E8C96A;color:#000;padding:13px 26px;text-decoration:none;border-radius:50px;font-weight:bold;">
+            View My Ticket
+          </a>
+          <p style="font-size:12px;color:#999;margin-top:26px;">© ${new Date().getFullYear()} Tictify. No printing needed — your phone is your ticket.</p>
+        </div>
+      `,
+    }).catch((err) => console.error("Ticket email failed:", err.message));
+  } catch (err) {
+    console.error("Ticket email lookup failed:", err.message);
+  }
+}
 
 /* =====================================================
    PAYSTACK WEBHOOK — PRODUCTION SAFE
@@ -100,6 +144,13 @@ export const handlePaymentWebhook = async (req, res) => {
         const qrCode = crypto.randomBytes(16).toString("hex");
         const qrImage = await QRCode.toDataURL(qrCode);
 
+        /* ── Group tickets: copy admits-per-ticket from the event tier ── */
+        const eventDoc = await Event.findById(payment.event).session(session);
+        const tierConfig = eventDoc?.ticketTypes.find(
+          (t) => t.name === payment.ticketType,
+        );
+        const groupSize = Math.max(1, tierConfig?.groupSize || 1);
+
         await Ticket.create(
           [
             {
@@ -113,17 +164,17 @@ export const handlePaymentWebhook = async (req, res) => {
               amountPaid: payment.organizerAmount,
               currency: "NGN",
               scanned: false,
+              groupSize,
+              admittedCount: 0,
             },
           ],
           { session },
         );
 
         /* ── Update event capacity ── */
-        const event = await Event.findById(payment.event).session(session);
+        const event = eventDoc;
         if (event) {
-          const ticketConfig = event.ticketTypes.find(
-            (t) => t.name === payment.ticketType,
-          );
+          const ticketConfig = tierConfig;
           if (ticketConfig) ticketConfig.sold += 1;
 
           const totalSold = event.ticketTypes.reduce(
@@ -156,6 +207,10 @@ export const handlePaymentWebhook = async (req, res) => {
     });
 
     session.endSession();
+
+    // 📧 deliver the ticket to the guest's inbox (fire-and-forget)
+    emailTicketToGuest(reference);
+
     return res.status(200).send("processed");
   } catch (error) {
     session.endSession();

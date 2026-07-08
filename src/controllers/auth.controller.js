@@ -4,11 +4,26 @@ import { sendEmail } from "../services/email.service.js";
 
 export const register = async (req, res) => {
   try {
-    const { name, email, password, role } = req.body;
+    const { name, password, role } = req.body;
+    const email = String(req.body.email || "").trim().toLowerCase();
 
     if (role !== "organizer") {
       return res.status(403).json({
         message: "Only organizers can register",
+      });
+    }
+
+    if (!name || !String(name).trim()) {
+      return res.status(400).json({ message: "Name is required" });
+    }
+
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: "A valid email is required" });
+    }
+
+    if (!password || String(password).length < 8) {
+      return res.status(400).json({
+        message: "Password must be at least 8 characters",
       });
     }
 
@@ -21,12 +36,21 @@ export const register = async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
-    const user = await User.create({
-      name,
-      email,
-      passwordHash,
-      role,
-    });
+    let user;
+    try {
+      user = await User.create({
+        name: String(name).trim(),
+        email,
+        passwordHash,
+        role,
+      });
+    } catch (createErr) {
+      // Unique-index race: two simultaneous signups with the same email
+      if (createErr.code === 11000) {
+        return res.status(409).json({ message: "Email already registered" });
+      }
+      throw createErr;
+    }
 
     // 📧 SEND WELCOME EMAIL (async, don't block response)
     sendEmail({
@@ -73,7 +97,8 @@ import jwt from "jsonwebtoken";
 
 export const login = async (req, res) => {
   try {
-    const { email, password } = req.body;
+    const { password } = req.body;
+    const email = String(req.body.email || "").trim().toLowerCase();
 
     const user = await User.findOne({ email, isActive: true });
     if (!user) {

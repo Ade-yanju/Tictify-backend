@@ -1,16 +1,18 @@
 import crypto from "crypto";
 import mongoose from "mongoose";
 import QRCode from "qrcode";
-import fetch from "node-fetch";
 import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
+import { sendEmail } from "../services/email.service.js";
 
 /* =====================================================
-   📧 SEND TICKET VIA SENDCHAMP (STRICT v1 COMPLIANCE)
+   📧 SEND TICKET EMAIL (multi-provider: Brevo/Gmail SMTP,
+   Resend, SendGrid, Mailgun — set EMAIL_PROVIDER in .env)
 ===================================================== */
 export const sendTicketViaEmail = async (req, res) => {
   try {
-    const { email, reference } = req.body;
+    const { reference } = req.body;
+    const email = String(req.body.email || "").trim().toLowerCase();
 
     if (!email || !reference) {
       return res
@@ -24,72 +26,52 @@ export const sendTicketViaEmail = async (req, res) => {
     );
     if (!ticket) return res.status(404).json({ message: "Ticket not found" });
 
-    // 2. Prepare Payload (Strict Object Structure for SendChamp)
-    const payload = {
+    const groupNote =
+      (ticket.groupSize || 1) > 1
+        ? `<p style="margin: 4px 0;"><strong>Admits:</strong> ${ticket.groupSize} guests on one QR code</p>`
+        : "";
+
+    // 2. Send through the configured provider (with auto-fallback)
+    const result = await sendEmail({
+      to: email,
       subject: `Your Ticket for ${ticket.event.title}`,
-      to: [
-        {
-          email: email,
-          name: "Valued Guest",
-        },
-      ],
-      from: {
-        email: "support@tictify.ng", // Must be a verified domain in SendChamp
-        name: "Tictify",
-      },
-      message_body: {
-        type: "text/html",
-        value: `
-          <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #f0f0f0; border-radius: 16px;">
-            <h2 style="color: #1F0D33;">Success! Your ticket is ready.</h2>
-            <p>Hi there, we've confirmed your purchase for <strong>${ticket.event.title}</strong>.</p>
-            <div style="background: #f8f9fa; padding: 20px; border-radius: 12px; margin: 24px 0;">
-               <p style="margin: 4px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
-               <p style="margin: 4px 0;"><strong>Date:</strong> ${new Date(ticket.event.date).toDateString()}</p>
-               <p style="margin: 4px 0;"><strong>Location:</strong> ${ticket.event.location}</p>
-               <p style="margin: 4px 0;"><strong>Reference:</strong> <code style="color: #22F2A6;">${reference}</code></p>
-            </div>
-            <a href="${process.env.FRONTEND_URL}/success/${reference}" 
-               style="display: inline-block; background: #22F2A6; color: #000; padding: 14px 28px; text-decoration: none; border-radius: 50px; font-weight: bold; text-align: center;">
-               Access Your QR Code
-            </a>
-            <p style="font-size: 12px; color: #888; margin-top: 30px; text-align: center;">
-              Powered by Tictify. Please have your QR code ready at the entrance.
-            </p>
+      html: `
+        <div style="font-family: sans-serif; max-width: 600px; margin: auto; padding: 30px; border: 1px solid #f0f0f0; border-radius: 16px;">
+          <h2 style="color: #1F0D33;">Success! Your ticket is ready.</h2>
+          <p>Hi there, we've confirmed your purchase for <strong>${ticket.event.title}</strong>.</p>
+          <div style="background: #f8f9fa; padding: 20px; border-radius: 12px; margin: 24px 0;">
+             <p style="margin: 4px 0;"><strong>Ticket Type:</strong> ${ticket.ticketType}</p>
+             ${groupNote}
+             <p style="margin: 4px 0;"><strong>Date:</strong> ${new Date(ticket.event.date).toDateString()}</p>
+             <p style="margin: 4px 0;"><strong>Location:</strong> ${ticket.event.location}</p>
+             <p style="margin: 4px 0;"><strong>Reference:</strong> <code style="color: #B8952E;">${reference}</code></p>
           </div>
-        `,
-      },
-    };
+          ${
+            ticket.qrImage
+              ? `<div style="text-align:center;background:#f8f9fa;padding:20px;border-radius:12px;margin:24px 0;">
+                   <p style="font-size:12px;color:#888;margin:0 0 10px;">Show this QR code at the entrance</p>
+                   <img src="${ticket.qrImage}" alt="Ticket QR" style="width:200px;height:200px;" />
+                 </div>`
+              : ""
+          }
+          <a href="${process.env.FRONTEND_URL}/success/${reference}"
+             style="display: inline-block; background: #E8C96A; color: #000; padding: 14px 28px; text-decoration: none; border-radius: 50px; font-weight: bold; text-align: center;">
+             Access Your QR Code
+          </a>
+          <p style="font-size: 12px; color: #888; margin-top: 30px; text-align: center;">
+            Powered by Tictify. Please have your QR code ready at the entrance.
+          </p>
+        </div>
+      `,
+    });
 
-    // 3. Request to SendChamp
-    const response = await fetch(
-      "https://api.sendchamp.com/api/v1/email/send",
-      {
-        method: "POST",
-        headers: {
-          Accept: "application/json",
-          "Content-Type": "application/json",
-          Authorization: `Bearer ${process.env.SENDCHAMP_KEY}`,
-        },
-        body: JSON.stringify(payload),
-      },
-    );
-
-    const data = await response.json();
-
-    // Check for success status or 200/201 codes
-    if (response.ok && (data.status === "success" || data.code <= 201)) {
-      return res.json({
-        success: true,
-        message: "Email delivered successfully.",
-      });
-    } else {
-      console.error("SENDCHAMP FAILURE LOG:", JSON.stringify(data, null, 2));
-      return res.status(400).json({
-        message: "Email provider error",
-        error: data.message || "Provider rejected the request",
+    if (result?.success === false) {
+      return res.status(502).json({
+        message: "Email provider not configured or rejected the request",
       });
     }
+
+    return res.json({ success: true, message: "Email delivered successfully." });
   } catch (error) {
     console.error("CRITICAL EMAIL SYSTEM ERROR:", error);
     return res.status(500).json({ message: "Internal server failure." });
@@ -130,41 +112,99 @@ export const getTicketByReference = async (req, res) => {
 };
 
 /* =====================================================
-   🔥 ATOMIC SCANNER (THREAD-SAFE)
+   🔥 ATOMIC SCANNER (THREAD-SAFE, GROUP-AWARE)
+   Accepts any of:
+   - the QR payload (hex code, or legacy "TICKET:<ref>:<email>")
+   - a manually typed payment reference (any case)
 ===================================================== */
 export const scanTicketController = async (req, res) => {
   try {
     const { code, eventId } = req.body;
-    if (!code || !eventId)
-      return res.status(400).json({ message: "Invalid scan" });
-
-    const event = await Event.findById(eventId);
-    if (!event || event.organizer.toString() !== req.user._id.toString()) {
-      return res.status(403).json({ message: "Access denied" });
+    if (!code || typeof code !== "string") {
+      return res.status(400).json({ message: "Ticket code is required" });
     }
 
+    /* ── Normalize the scanned/typed code ── */
+    const raw = code.trim();
+    const or = [];
+    if (raw.toUpperCase().startsWith("TICKET:")) {
+      // legacy QR payload: TICKET:<reference>:<email>
+      const ref = raw.split(":")[1]?.trim();
+      if (ref) or.push({ paymentRef: ref }, { paymentRef: ref.toUpperCase() });
+    } else {
+      // hex qr code, or a reference typed by hand
+      or.push(
+        { qrCode: raw },
+        { qrCode: raw.toLowerCase() },
+        { paymentRef: raw },
+        { paymentRef: raw.toUpperCase() },
+      );
+    }
+    if (or.length === 0) {
+      return res.status(404).json({ message: "Ticket not found" });
+    }
+
+    /* ── Locate the ticket (case-insensitive for typed codes) ── */
+    const lookup = eventId ? { $or: or, event: eventId } : { $or: or };
+    const found = await Ticket.findOne(lookup)
+      .collation({ locale: "en", strength: 2 })
+      .populate("event");
+    if (!found) {
+      return res.status(404).json({ message: "Ticket not found" });
+    }
+
+    /* ── Ownership: only this event's organizer may admit ── */
+    const eventOrganizer =
+      found.event?.organizer?.toString() || found.organizer?.toString();
+    if (!eventOrganizer || eventOrganizer !== req.user._id.toString()) {
+      return res
+        .status(403)
+        .json({ message: "You are not authorized to scan this ticket" });
+    }
+
+    /* ── Atomic group admission (prevents double-admit races) ── */
+    const groupSize = Math.max(1, found.groupSize || 1);
     const ticket = await Ticket.findOneAndUpdate(
-      { qrCode: code, event: eventId, scanned: false },
-      { scanned: true, scannedAt: new Date() },
+      {
+        _id: found._id,
+        scanned: { $ne: true }, // legacy fully-used tickets stay rejected
+        $expr: { $lt: [{ $ifNull: ["$admittedCount", 0] }, groupSize] },
+      },
+      {
+        $inc: { admittedCount: 1 },
+        $set: { scannedAt: new Date() },
+      },
       { new: true },
     );
 
+    // Final guest in the group → mark the ticket fully used
+    if (ticket && ticket.admittedCount >= groupSize && !ticket.scanned) {
+      ticket.scanned = true;
+      await ticket.save();
+    }
+
     if (!ticket) {
-      const alreadyScanned = await Ticket.findOne({
-        qrCode: code,
-        event: eventId,
+      return res.status(409).json({
+        message:
+          groupSize > 1
+            ? `Ticket fully used — all ${groupSize} guests already admitted`
+            : "Ticket already used",
       });
-      return alreadyScanned
-        ? res.status(409).json({ message: "Ticket already used" })
-        : res.status(404).json({ message: "Ticket not found" });
     }
 
     return res.json({
-      message: "Access granted",
+      message:
+        groupSize > 1
+          ? `Access granted — guest ${ticket.admittedCount} of ${groupSize}`
+          : "Access granted",
       attendee: ticket.buyerEmail,
       ticketType: ticket.ticketType,
+      admitted: ticket.admittedCount,
+      groupSize,
+      remaining: groupSize - ticket.admittedCount,
     });
   } catch (error) {
+    console.error("SCAN ERROR:", error);
     return res.status(500).json({ message: "Scan processing error" });
   }
 };
@@ -211,6 +251,7 @@ export const createFreeTicket = async (req, res) => {
     const paymentRef = `FREE-${crypto.randomBytes(8).toString("hex")}`;
     const qrCode = crypto.randomBytes(16).toString("hex");
     const qrImage = await QRCode.toDataURL(qrCode);
+    const tierConfig = event.ticketTypes.find((t) => t.name === ticketType);
 
     await Ticket.create({
       event: event._id,
@@ -223,6 +264,8 @@ export const createFreeTicket = async (req, res) => {
       amountPaid: 0,
       currency: "NGN",
       scanned: false,
+      groupSize: Math.max(1, tierConfig?.groupSize || 1),
+      admittedCount: 0,
     });
 
     res.json({ success: true, reference: paymentRef });

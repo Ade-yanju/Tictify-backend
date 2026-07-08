@@ -95,6 +95,8 @@ export const initiatePayment = async (req, res) => {
         amountPaid: 0,
         currency: "NGN",
         scanned: false,
+        groupSize: Math.max(1, ticketConfig.groupSize || 1),
+        admittedCount: 0,
       });
 
       return res.json({
@@ -237,6 +239,12 @@ export const paymentCallback = async (req, res) => {
     const qrCode = crypto.randomBytes(16).toString("hex");
     const qrImage = await QRCode.toDataURL(qrCode);
 
+    /* 6️⃣ Update event capacity + resolve group size */
+    const event = await Event.findById(payment.event);
+    const tierConfig = event?.ticketTypes.find(
+      (t) => t.name === payment.ticketType,
+    );
+
     await Ticket.create({
       event: payment.event,
       organizer: payment.organizer,
@@ -248,14 +256,12 @@ export const paymentCallback = async (req, res) => {
       amountPaid: payment.organizerAmount,
       currency: "NGN",
       scanned: false,
+      groupSize: Math.max(1, tierConfig?.groupSize || 1),
+      admittedCount: 0,
     });
 
-    /* 6️⃣ Update event capacity */
-    const event = await Event.findById(payment.event);
     if (event) {
-      const ticketConfig = event.ticketTypes.find(
-        (t) => t.name === payment.ticketType,
-      );
+      const ticketConfig = tierConfig;
       if (ticketConfig) ticketConfig.sold += 1;
 
       const totalSold = event.ticketTypes.reduce(

@@ -55,7 +55,24 @@ const ticketSchema = new mongoose.Schema(
     },
 
     ticketType: {
-      type: String, // e.g. Regular, VIP, Early Bird
+      type: String, // e.g. Regular, VIP, Early Bird, Group of Friends
+    },
+
+    /* ── Group admission: one ticket can admit several guests ── */
+    groupSize: {
+      type: Number,
+      default: 1,
+      min: 1,
+    },
+
+    admittedCount: {
+      type: Number,
+      default: 0,
+      min: 0,
+    },
+
+    scannedAt: {
+      type: Date,
     },
   },
   { timestamps: true },
