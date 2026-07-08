@@ -4,6 +4,7 @@ import WalletTransaction from "../models/WalletTransaction.js";
 import {
   payoutToBank,
   paystackConfigured,
+  transferFee,
 } from "../services/paystack.service.js";
 
 const MIN_WITHDRAWAL = 500; // ₦
@@ -84,10 +85,17 @@ export const requestWithdrawal = async (req, res) => {
       });
     }
 
-    /* ── 5. Record the request + audit trail ── */
+    /* ── 5. Record the request + audit trail ──
+       The bank transfer fee is borne by the organizer:
+       wallet is debited `amount`, the bank receives `netAmount`. */
+    const fee = transferFee(amount);
+    const netAmount = amount - fee;
+
     const withdrawal = await Withdrawal.create({
       organizer: userId,
       amount,
+      transferFee: fee,
+      netAmount,
       bankDetails: { bankName, bankCode, accountNumber, accountName },
       status: "PENDING",
     });
@@ -97,7 +105,7 @@ export const requestWithdrawal = async (req, res) => {
       type: "DEBIT",
       amount,
       reference: `WD-HOLD-${withdrawal._id}`,
-      description: `Withdrawal request — funds held pending payout (${bankName} ····${accountNumber.slice(-4)})`,
+      description: `Withdrawal — ₦${netAmount.toLocaleString()} to ${bankName} ····${accountNumber.slice(-4)} (₦${fee} bank transfer fee)`,
     });
 
     /* ── 6. INSTANT PAYOUT MODE (AUTO_APPROVE_WITHDRAWALS=true) ──
@@ -106,7 +114,7 @@ export const requestWithdrawal = async (req, res) => {
     if (process.env.AUTO_APPROVE_WITHDRAWALS === "true" && paystackConfigured) {
       try {
         const payout = await payoutToBank({
-          amount,
+          amount: netAmount, // fee already withheld from the organizer
           bankDetails: { bankName, bankCode, accountNumber, accountName },
           reason: `Tictify payout — ${accountName}`,
         });
@@ -130,7 +138,7 @@ export const requestWithdrawal = async (req, res) => {
         });
 
         return res.status(200).json({
-          message: "Payout initiated! Funds are on the way to your bank.",
+          message: `Payout initiated! ₦${netAmount.toLocaleString()} is on the way to your bank (₦${fee} bank transfer fee).`,
           withdrawal,
           newBalance: wallet.balance,
         });
@@ -141,8 +149,7 @@ export const requestWithdrawal = async (req, res) => {
     }
 
     return res.status(201).json({
-      message:
-        "Withdrawal request submitted. Funds are reserved and will be paid out once approved.",
+      message: `Withdrawal request submitted. You'll receive ₦${netAmount.toLocaleString()} (₦${fee} bank transfer fee) once approved.`,
       withdrawal,
       newBalance: wallet.balance,
     });

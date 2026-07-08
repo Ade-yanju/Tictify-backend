@@ -4,13 +4,13 @@ import { handlePaymentWebhook } from "../controllers/webhook.controller.js";
 const router = express.Router();
 
 /**
- * ErcasPay Webhook
- * Called by payment gateway after payment
+ * Paystack Webhook — charge confirmations AND transfer verdicts.
+ * Configure in the Paystack dashboard as:
+ *   https://<backend>/api/webhooks/paystack
+ * (the legacy /webhook/paystack path still works)
+ * Raw body is provided by the app-level express.raw() mount in index.js.
  */
-router.post(
-  "/webhook/paystack",
-  express.raw({ type: "application/json" }),
-  handlePaymentWebhook,
-);
+router.post("/paystack", handlePaymentWebhook);
+router.post("/webhook/paystack", handlePaymentWebhook);
 
 export default router;

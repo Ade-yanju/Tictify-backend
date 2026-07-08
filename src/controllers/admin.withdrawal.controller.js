@@ -52,8 +52,11 @@ export const approveWithdrawal = async (req, res) => {
     /* ── Automatic payout when Paystack is configured ── */
     if (paystackConfigured) {
       try {
+        // netAmount = amount minus the organizer-borne transfer fee
+        // (legacy records without netAmount fall back to full amount)
+        const payAmount = withdrawal.netAmount ?? withdrawal.amount;
         const payout = await payoutToBank({
-          amount: withdrawal.amount,
+          amount: payAmount,
           bankDetails: withdrawal.bankDetails || {},
           reason: `Tictify payout — ${withdrawal.bankDetails?.accountName}`,
         });

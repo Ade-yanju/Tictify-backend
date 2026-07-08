@@ -10,8 +10,17 @@ const withdrawalSchema = new mongoose.Schema(
     },
 
     amount: {
-      type: Number,
+      type: Number, // amount deducted from the wallet
       required: true,
+    },
+
+    transferFee: {
+      type: Number, // Paystack transfer fee — borne by the organizer
+      default: 0,
+    },
+
+    netAmount: {
+      type: Number, // what actually lands in the organizer's bank
     },
 
     status: {
