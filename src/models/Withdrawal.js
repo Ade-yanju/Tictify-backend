@@ -22,6 +22,7 @@ const withdrawalSchema = new mongoose.Schema(
 
     bankDetails: {
       bankName: String,
+      bankCode: String, // required for Paystack payouts — was silently dropped
       accountNumber: String,
       accountName: String,
     },
@@ -30,6 +31,7 @@ const withdrawalSchema = new mongoose.Schema(
       ref: "User", // admin
     },
     approvedAt: Date,
+    paystackReference: String,
   },
   { timestamps: true },
 );

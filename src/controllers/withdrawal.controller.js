@@ -1,122 +1,122 @@
 import Withdrawal from "../models/Withdrawal.js";
 import Wallet from "../models/Wallet.js";
 import WalletTransaction from "../models/WalletTransaction.js";
+import crypto from "crypto";
 
-const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const MIN_WITHDRAWAL = 500; // ₦
+const MAX_WITHDRAWAL = 5_000_000; // ₦ sanity ceiling per request
 
-/* ================= REQUEST WITHDRAWAL ================= */
+/* =====================================================
+   REQUEST WITHDRAWAL — escrow model
+   1. Strictly validate amount + bank details
+   2. Atomically HOLD the funds (balance can never go
+      negative, races can never double-spend)
+   3. Create a PENDING request for admin review
+===================================================== */
 export const requestWithdrawal = async (req, res) => {
-  const { amount, bankDetails } = req.body;
   const userId = req.user.id;
 
   try {
-    const wallet = await Wallet.findOne({ organizer: userId });
-
-    if (!wallet || wallet.balance < amount) {
-      return res.status(400).json({ message: "Insufficient wallet balance" });
+    /* ── 1. Validate amount: must be a positive integer in range ── */
+    const amount = Number(req.body.amount);
+    if (!Number.isFinite(amount) || !Number.isInteger(amount)) {
+      return res.status(400).json({ message: "Invalid withdrawal amount" });
+    }
+    if (amount < MIN_WITHDRAWAL) {
+      return res
+        .status(400)
+        .json({ message: `Minimum withdrawal is ₦${MIN_WITHDRAWAL}` });
+    }
+    if (amount > MAX_WITHDRAWAL) {
+      return res.status(400).json({
+        message: `Maximum per request is ₦${MAX_WITHDRAWAL.toLocaleString()}`,
+      });
     }
 
-    // 1. Immediate Deduction (Anti-fraud lock)
-    wallet.balance -= amount;
-    await wallet.save();
+    /* ── 2. Validate bank details ── */
+    const bd = req.body.bankDetails || {};
+    const accountNumber = String(bd.accountNumber || "").trim();
+    const accountName = String(bd.accountName || "").trim();
+    const bankCode = String(bd.bankCode || "").trim();
+    const bankName = String(bd.bankName || "").trim();
 
-    try {
-      // 2. Create Paystack Recipient
-      const recipientResponse = await fetch(
-        "https://api.paystack.co/transferrecipient",
-        {
-          method: "POST",
-          headers: {
-            Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-            "Content-Type": "application/json",
-          },
-          body: JSON.stringify({
-            type: "nuban",
-            name: bankDetails.accountName,
-            account_number: bankDetails.accountNumber,
-            bank_code: bankDetails.bankCode,
-            currency: "NGN",
-          }),
-        },
-      );
-
-      const recipientData = await recipientResponse.json();
-
-      if (!recipientData.status) {
-        throw new Error(`Recipient Setup Failed: ${recipientData.message}`);
-      }
-
-      // 3. Initiate Transfer
-      const transferResponse = await fetch("https://api.paystack.co/transfer", {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${PAYSTACK_SECRET_KEY}`,
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          source: "balance",
-          amount: amount * 100, // Convert to Kobo
-          recipient: recipientData.data.recipient_code,
-          reason: `Payout for ${bankDetails.accountName}`,
-        }),
-      });
-
-      const transferData = await transferResponse.json();
-
-      if (!transferData.status) {
-        throw new Error(`Transfer Failed: ${transferData.message}`);
-      }
-
-      // 4. Log Success
-      wallet.totalWithdrawn = (wallet.totalWithdrawn || 0) + amount;
-      await wallet.save();
-
-      await WalletTransaction.create({
-        organizer: userId,
-        type: "DEBIT",
-        amount,
-        reference: transferData.data.reference,
-        description: "Instant Payout via Paystack",
-      });
-
-      const withdrawal = await Withdrawal.create({
-        organizer: userId,
-        amount,
-        bankDetails,
-        status: "APPROVED",
-        paystackReference: transferData.data.reference,
-      });
-
-      return res.status(200).json({
-        message: "Funds are on the way!",
-        withdrawal,
-      });
-    } catch (paystackError) {
-      // ROLLBACK: Return money to wallet if Paystack rejects the request
-      wallet.balance += amount;
-      await wallet.save();
-
-      console.error("PAYSTACK REJECTION:", paystackError.message);
-      return res.status(400).json({ message: paystackError.message });
+    if (!/^\d{10}$/.test(accountNumber)) {
+      return res
+        .status(400)
+        .json({ message: "Account number must be exactly 10 digits" });
     }
+    if (accountName.length < 3) {
+      return res.status(400).json({ message: "Account name is required" });
+    }
+    if (!bankCode || !bankName) {
+      return res.status(400).json({ message: "Please select a bank" });
+    }
+
+    /* ── 3. One pending request at a time ── */
+    const pending = await Withdrawal.findOne({
+      organizer: userId,
+      status: "PENDING",
+    });
+    if (pending) {
+      return res.status(409).json({
+        message:
+          "You already have a pending withdrawal. Wait for it to be processed.",
+      });
+    }
+
+    /* ── 4. ATOMIC HOLD: verify balance and deduct in ONE database
+           operation — concurrent requests cannot both pass ── */
+    const wallet = await Wallet.findOneAndUpdate(
+      { organizer: userId, balance: { $gte: amount } },
+      { $inc: { balance: -amount } },
+      { new: true },
+    );
+
+    if (!wallet) {
+      const current = await Wallet.findOne({ organizer: userId });
+      return res.status(400).json({
+        message: `Insufficient wallet balance. Available: ₦${(
+          current?.balance || 0
+        ).toLocaleString()}`,
+      });
+    }
+
+    /* ── 5. Record the request + audit trail ── */
+    const withdrawal = await Withdrawal.create({
+      organizer: userId,
+      amount,
+      bankDetails: { bankName, bankCode, accountNumber, accountName },
+      status: "PENDING",
+    });
+
+    await WalletTransaction.create({
+      organizer: userId,
+      type: "DEBIT",
+      amount,
+      reference: `WD-HOLD-${withdrawal._id}`,
+      description: `Withdrawal request — funds held pending admin approval (${bankName} ····${accountNumber.slice(-4)})`,
+    });
+
+    return res.status(201).json({
+      message:
+        "Withdrawal request submitted. Funds are reserved and will be paid out once approved.",
+      withdrawal,
+      newBalance: wallet.balance,
+    });
   } catch (err) {
-    console.error("INTERNAL WITHDRAWAL ERROR:", err);
-    res
+    console.error("WITHDRAWAL REQUEST ERROR:", err);
+    return res
       .status(500)
-      .json({ message: "Critical error during withdrawal processing." });
+      .json({ message: "Could not process withdrawal request" });
   }
 };
 
-/* ================= GET ALL WITHDRAWALS (The Missing Export) ================= */
+/* ================= ORGANIZER: WITHDRAWAL HISTORY ================= */
 export const getAllWithdrawals = async (req, res) => {
   try {
-    const userId = req.user.id;
-
-    // Fetch withdrawals specifically for this organizer
-    const withdrawals = await Withdrawal.find({ organizer: userId }).sort({
+    const withdrawals = await Withdrawal.find({ organizer: req.user.id }).sort({
       createdAt: -1,
     });
-
     res.json(withdrawals);
   } catch (error) {
     console.error("FETCH WITHDRAWALS ERROR:", error);

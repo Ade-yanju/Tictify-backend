@@ -9,11 +9,6 @@ import {
   getAdminEvents,
 } from "../controllers/admin.controller.js";
 
-import {
-  getAllWithdrawals,
-  // approveWithdrawal, <--- DELETE THIS LINE
-} from "../controllers/withdrawal.controller.js";
-
 const router = express.Router();
 
 /* ================= ADMIN DASHBOARD ================= */
@@ -28,18 +23,10 @@ router.get("/organizers", authenticate, adminOnly, getAdminOrganizers);
 /* ================= EVENTS ================= */
 router.get("/events", authenticate, adminOnly, getAdminEvents);
 
-/* ================= WITHDRAWALS ================= */
-// Keep this so admins can see the history of instant payouts
-router.get("/withdrawals", authenticate, adminOnly, getAllWithdrawals);
-
-// DELETE THIS ROUTE BELOW - It's no longer needed for instant payouts
-/*
-router.patch(
-  "/withdrawals/:id/approve",
-  authenticate,
-  adminOnly,
-  approveWithdrawal,
-);
-*/
+/* NOTE: /withdrawals (list, approve, reject) lives in
+   admin.withdrawal.routes.js — do not redefine it here.
+   A duplicate GET /withdrawals previously shadowed the real
+   admin controller with the organizer-scoped one, so the
+   admin panel always showed an empty list. */
 
 export default router;
