@@ -304,6 +304,22 @@ export const handlePaymentWebhook = async (req, res) => {
     // 📧 deliver the ticket to the guest's inbox (fire-and-forget)
     emailTicketToGuest(reference);
 
+    // 🔔 tell the organizer they made a sale (fire-and-forget)
+    Payment.findOne({ reference })
+      .populate("event", "title")
+      .then((p) => {
+        if (!p) return;
+        return import("../services/push.service.js").then(({ notifyTicketSale }) =>
+          notifyTicketSale({
+            organizerId: p.organizer,
+            eventTitle: p.event?.title || "your event",
+            ticketType: p.ticketType,
+            amount: p.organizerAmount,
+          }),
+        );
+      })
+      .catch((err) => console.error("Sale push failed:", err.message));
+
     return res.status(200).send("processed");
   } catch (error) {
     session.endSession();

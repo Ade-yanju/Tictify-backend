@@ -52,6 +52,13 @@ export const createEvent = async (req, res) => {
       banner,
     });
 
+    // 🔔 New LIVE event → push alert to subscribed guests (fire-and-forget)
+    if (event.status === "LIVE") {
+      import("../services/push.service.js")
+        .then(({ notifyNewEvent }) => notifyNewEvent(event))
+        .catch((err) => console.error("Push notify failed:", err.message));
+    }
+
     res.status(201).json(event);
   } catch (err) {
     console.error("CREATE EVENT ERROR:", err);

@@ -17,6 +17,7 @@ import organizerRoutes from "./routes/organizer.routes.js";
 import adminRoutes from "./routes/admin.routes.js";
 import adminWithdrawalRoutes from "./routes/admin.withdrawal.routes.js";
 import walletRoutes from "./routes/wallet.routes.js";
+import notificationRoutes from "./routes/notification.routes.js";
 
 const app = express();
 
@@ -61,6 +62,7 @@ app.use("/api/organizer", organizerRoutes);
 app.use("/api/admin", adminRoutes);
 app.use("/api/admin", adminWithdrawalRoutes);
 app.use("/api/organizer/wallet", walletRoutes);
+app.use("/api/notifications", notificationRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;
