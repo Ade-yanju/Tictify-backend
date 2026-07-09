@@ -15,7 +15,7 @@ const userSchema = new mongoose.Schema(
 
     role: {
       type: String,
-      enum: ["admin", "organizer"],
+      enum: ["admin", "organizer", "ambassador"],
       default: "organizer",
     },
 
@@ -23,6 +23,13 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+
+    /* Ambassador invite code that referred this organizer (optional) */
+    referredBy: { type: String, uppercase: true, trim: true, index: true },
+
+    /* Password reset (forgot-password flow) */
+    resetTokenHash: String,
+    resetTokenExp: Date,
   },
   { timestamps: true }
 );

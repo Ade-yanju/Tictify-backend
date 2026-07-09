@@ -36,6 +36,10 @@ export const register = async (req, res) => {
 
     const passwordHash = await bcrypt.hash(password, 12);
 
+    /* Optional ambassador invite code (?invite=CODE on the register page) */
+    const refRaw = String(req.body.referredBy || "").trim().toUpperCase();
+    const referredBy = /^[A-Z0-9_-]{2,30}$/.test(refRaw) ? refRaw : undefined;
+
     let user;
     try {
       user = await User.create({
@@ -43,6 +47,7 @@ export const register = async (req, res) => {
         email,
         passwordHash,
         role,
+        referredBy,
       });
     } catch (createErr) {
       // Unique-index race: two simultaneous signups with the same email
@@ -130,5 +135,86 @@ export const login = async (req, res) => {
   } catch (error) {
     console.error("LOGIN ERROR:", error);
     res.status(500).json({ message: "Login failed" });
+  }
+};
+
+/* =====================================================
+   FORGOT PASSWORD — always answers neutrally (no email
+   enumeration); emails a 30-minute reset link
+===================================================== */
+import crypto from "crypto";
+import { sendEmail as sendResetEmail } from "../services/email.service.js";
+
+const neutralReset = {
+  message: "If that email is registered, a reset link is on its way.",
+};
+
+export const forgotPassword = async (req, res) => {
+  try {
+    const email = String(req.body.email || "").trim().toLowerCase();
+    if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email)) {
+      return res.status(400).json({ message: "A valid email is required" });
+    }
+
+    const user = await User.findOne({ email, isActive: true });
+    if (user) {
+      const token = crypto.randomBytes(32).toString("hex");
+      user.resetTokenHash = crypto.createHash("sha256").update(token).digest("hex");
+      user.resetTokenExp = new Date(Date.now() + 30 * 60 * 1000);
+      await user.save();
+
+      const link = `${process.env.FRONTEND_URL}/reset-password/${token}`;
+      sendResetEmail({
+        to: email,
+        subject: "Reset your Tictify password",
+        html: `
+          <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;">
+            <h2 style="color:#1a1a1a;">Reset your password</h2>
+            <p style="color:#555;line-height:1.7;">Tap the button below to choose a new password.
+            This link expires in <strong>30 minutes</strong>.</p>
+            <a href="${link}" style="display:inline-block;background:#E8C96A;color:#000;padding:13px 28px;border-radius:50px;text-decoration:none;font-weight:bold;margin:14px 0;">Choose a new password</a>
+            <p style="color:#999;font-size:12px;">Didn't request this? You can safely ignore this email — your password stays unchanged.</p>
+          </div>
+        `,
+      }).catch((e) => console.error("Reset email failed:", e.message));
+    }
+
+    return res.json(neutralReset);
+  } catch (err) {
+    console.error("FORGOT PASSWORD ERROR:", err);
+    return res.json(neutralReset);
+  }
+};
+
+export const resetPassword = async (req, res) => {
+  try {
+    const { token, password } = req.body;
+    if (!token || typeof token !== "string") {
+      return res.status(400).json({ message: "Invalid reset link" });
+    }
+    if (!password || String(password).length < 8) {
+      return res.status(400).json({ message: "Password must be at least 8 characters" });
+    }
+
+    const tokenHash = crypto.createHash("sha256").update(token).digest("hex");
+    const user = await User.findOne({
+      resetTokenHash: tokenHash,
+      resetTokenExp: { $gt: new Date() },
+    });
+    if (!user) {
+      return res.status(400).json({
+        message: "This reset link is invalid or has expired. Request a new one.",
+      });
+    }
+
+    user.passwordHash = await bcrypt.hash(password, 12);
+    user.resetTokenHash = undefined;
+    user.resetTokenExp = undefined;
+    await user.save();
+
+    return res.json({ message: "Password updated — you can log in now." });
+  } catch (err) {
+    console.error("RESET PASSWORD ERROR:", err);
+    return res.status(500).json({ message: "Could not reset password" });
   }
 };

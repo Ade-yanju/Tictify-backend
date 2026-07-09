@@ -18,8 +18,15 @@ import adminRoutes from "./routes/admin.routes.js";
 import adminWithdrawalRoutes from "./routes/admin.withdrawal.routes.js";
 import walletRoutes from "./routes/wallet.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
+import ambassadorRoutes from "./routes/ambassador.routes.js";
 
 const app = express();
+
+/* Render/Heroku sit behind a reverse proxy — without this,
+   express-rate-limit throws ERR_ERL_UNEXPECTED_X_FORWARDED_FOR
+   on every rate-limited route (breaking register/login in prod)
+   and counts all users as one IP. */
+app.set("trust proxy", 1);
 
 /* ================= CORS ================= */
 const allowedOrigins = [
@@ -63,6 +70,7 @@ app.use("/api/admin", adminRoutes);
 app.use("/api/admin", adminWithdrawalRoutes);
 app.use("/api/organizer/wallet", walletRoutes);
 app.use("/api/notifications", notificationRoutes);
+app.use("/api/ambassadors", ambassadorRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;
@@ -70,6 +78,7 @@ const PORT = process.env.PORT || 5000;
 await mongoose.connect(process.env.MONGO_URI);
 console.log("MongoDB connected");
 
-app.listen(PORT, () => {
+// Bind explicitly to 0.0.0.0 so Render's port scanner always sees us
+app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
