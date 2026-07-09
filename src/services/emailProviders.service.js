@@ -14,12 +14,56 @@ function configured(...values) {
   );
 }
 
+/* Sender identity — must belong to a domain verified with the provider */
+const FROM_EMAIL = process.env.EMAIL_FROM || "noreply@tictify.ng";
+const FROM_NAME = process.env.EMAIL_FROM_NAME || "Tictify";
+
 const providers = {
   resend: createResendProvider,
+  mailtrap: createMailtrapProvider,
   sendgrid: createSendGridProvider,
   mailgun: createMailgunProvider,
   smtp: createSMTPProvider,
 };
+
+/* Mailtrap Email Sending (free tier ~150/day) — REST API.
+   NOTE: this is the production "Email Sending" product, not the
+   testing sandbox; the domain must be verified in Mailtrap.
+   Accepts MAILTRAP_TOKEN or MAILTRAP_API_KEY. */
+function createMailtrapProvider() {
+  const token = process.env.MAILTRAP_TOKEN || process.env.MAILTRAP_API_KEY;
+  if (!configured(token)) {
+    return null;
+  }
+
+  return {
+    name: "Mailtrap",
+    send: async ({ to, subject, html }) => {
+      const response = await fetch("https://send.api.mailtrap.io/api/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          from: { email: FROM_EMAIL, name: FROM_NAME },
+          to: [{ email: to }],
+          subject,
+          html,
+        }),
+      });
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(
+          `Mailtrap error: ${response.status} ${detail.slice(0, 140)}`,
+        );
+      }
+
+      return await response.json();
+    },
+  };
+}
 
 function createResendProvider() {
   if (!configured(process.env.RESEND_API_KEY)) {
@@ -36,7 +80,7 @@ function createResendProvider() {
           "Content-Type": "application/json",
         },
         body: JSON.stringify({
-          from: "noreply@tictify.ng",
+          from: `${FROM_NAME} <${FROM_EMAIL}>`,
           to,
           subject,
           html,
