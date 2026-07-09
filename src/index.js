@@ -21,6 +21,7 @@ import notificationRoutes from "./routes/notification.routes.js";
 import ambassadorRoutes from "./routes/ambassador.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import discountRoutes from "./routes/discount.routes.js";
+import affiliateRoutes from "./routes/affiliate.routes.js";
 
 const app = express();
 
@@ -75,6 +76,7 @@ app.use("/api/notifications", notificationRoutes);
 app.use("/api/ambassadors", ambassadorRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/discounts", discountRoutes);
+app.use("/api/affiliates", affiliateRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;

@@ -24,6 +24,60 @@ const RATE = Math.min(
 export async function creditAmbassadorCommission(payment) {
   try {
     if (!payment || payment.status !== "SUCCESS") return;
+
+    /* ── AFFILIATE CUT (organizer-funded, per-event opt-in) ──
+       If the ?ref= code belongs to an affiliate and the event
+       allows affiliates: affiliatePercent% of the ticket price
+       moves organizer wallet → affiliate wallet. */
+    if (payment.promoter && Number(payment.organizerAmount) > 0) {
+      const affiliate = await User.findOne({
+        affiliateCode: payment.promoter,
+        role: "affiliate",
+        isActive: true,
+      });
+      if (affiliate) {
+        const { default: Event } = await import("../models/Event.js");
+        const ev = await Event.findById(payment.event).select(
+          "affiliatesEnabled affiliatePercent title",
+        );
+        if (ev?.affiliatesEnabled) {
+          const pct = Math.min(50, Math.max(1, ev.affiliatePercent || 15));
+          const cut = Math.round((payment.organizerAmount * pct) / 100);
+          const ref = `AFF-${payment.reference}`;
+          const dup = await WalletTransaction.findOne({ reference: ref });
+          if (cut > 0 && !dup) {
+            await Wallet.updateOne(
+              { organizer: payment.organizer },
+              { $inc: { balance: -cut, totalEarnings: -cut } },
+            );
+            await Wallet.updateOne(
+              { organizer: affiliate._id },
+              { $inc: { balance: cut, totalEarnings: cut } },
+              { upsert: true },
+            );
+            await WalletTransaction.create([
+              {
+                organizer: payment.organizer,
+                type: "DEBIT",
+                amount: cut,
+                reference: ref,
+                description: `Affiliate commission (${pct}%) to ${payment.promoter} — "${ev.title}"`,
+              },
+              {
+                organizer: affiliate._id,
+                type: "CREDIT",
+                amount: cut,
+                reference: `${ref}-IN`,
+                description: `Affiliate commission (${pct}%) — "${ev.title}"`,
+              },
+            ]);
+            console.log(`🤝 Affiliate ₦${cut} → ${payment.promoter} (${payment.reference})`);
+          }
+        }
+        return; // an affiliate code never double-pays the ambassador path
+      }
+    }
+
     const fee = Number(payment.platformFee) || 0;
     if (fee <= 0) return; // free events / recovered payments carry no fee
 

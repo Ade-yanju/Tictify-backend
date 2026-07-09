@@ -12,7 +12,7 @@ const router = express.Router();
 router.post(
   "/request",
   authenticate,
-  authorize("organizer", "ambassador"), // ambassadors withdraw commissions too
+  authorize("organizer", "ambassador", "affiliate"), // partners & affiliates withdraw too
   requestWithdrawal,
 );
 

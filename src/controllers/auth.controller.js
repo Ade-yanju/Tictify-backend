@@ -7,9 +7,9 @@ export const register = async (req, res) => {
     const { name, password, role } = req.body;
     const email = String(req.body.email || "").trim().toLowerCase();
 
-    if (role !== "organizer") {
+    if (!["organizer", "affiliate"].includes(role)) {
       return res.status(403).json({
-        message: "Only organizers can register",
+        message: "Only organizers and affiliates can register",
       });
     }
 
@@ -40,6 +40,15 @@ export const register = async (req, res) => {
     const refRaw = String(req.body.referredBy || "").trim().toUpperCase();
     const referredBy = /^[A-Z0-9_-]{2,30}$/.test(refRaw) ? refRaw : undefined;
 
+    /* Affiliates get a personal promo code at signup */
+    let affiliateCode;
+    if (role === "affiliate") {
+      const { randomBytes } = await import("crypto");
+      const prefix =
+        String(name).replace(/[^a-zA-Z]/g, "").slice(0, 6).toUpperCase() || "AFF";
+      affiliateCode = `${prefix}-${randomBytes(2).toString("hex").toUpperCase()}`;
+    }
+
     let user;
     try {
       user = await User.create({
@@ -48,6 +57,7 @@ export const register = async (req, res) => {
         passwordHash,
         role,
         referredBy,
+        affiliateCode,
       });
     } catch (createErr) {
       // Unique-index race: two simultaneous signups with the same email
@@ -89,7 +99,11 @@ export const register = async (req, res) => {
     }).catch(err => console.error("Welcome email failed:", err.message));
 
     return res.status(201).json({
-      message: "Organizer account created successfully",
+      message:
+        role === "affiliate"
+          ? "Affiliate account created successfully"
+          : "Organizer account created successfully",
+      affiliateCode,
     });
   } catch (error) {
     console.error("REGISTER ERROR:", error);

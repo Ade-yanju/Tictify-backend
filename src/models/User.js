@@ -15,7 +15,7 @@ const userSchema = new mongoose.Schema(
 
     role: {
       type: String,
-      enum: ["admin", "organizer", "ambassador"],
+      enum: ["admin", "organizer", "ambassador", "affiliate"],
       default: "organizer",
     },
 
@@ -23,6 +23,9 @@ const userSchema = new mongoose.Schema(
       type: Boolean,
       default: true,
     },
+
+    /* Affiliate: their personal promo code (?ref=) */
+    affiliateCode: { type: String, uppercase: true, sparse: true, unique: true },
 
     /* Ambassador invite code that referred this organizer (optional) */
     referredBy: { type: String, uppercase: true, trim: true, index: true },

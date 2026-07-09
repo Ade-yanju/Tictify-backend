@@ -52,6 +52,8 @@ export const createEvent = async (req, res) => {
       banner,
       category: req.body.category || "Other",
       city: String(req.body.city || "").trim(),
+      affiliatesEnabled: Boolean(req.body.affiliatesEnabled),
+      affiliatePercent: Math.min(50, Math.max(1, parseInt(req.body.affiliatePercent) || 15)),
     });
 
     // 🔔 New LIVE event → push alert to subscribed guests (fire-and-forget)
@@ -366,6 +368,10 @@ export const updateEvent = async (req, res) => {
       if (b[f] != null && String(b[f]).trim()) event[f] = String(b[f]).trim();
     }
     if (b.category) event.category = b.category;
+    if (b.affiliatesEnabled != null) event.affiliatesEnabled = Boolean(b.affiliatesEnabled);
+    if (b.affiliatePercent != null) {
+      event.affiliatePercent = Math.min(50, Math.max(1, parseInt(b.affiliatePercent) || 15));
+    }
     if (b.date) event.date = new Date(b.date);
     if (b.endDate) event.endDate = new Date(b.endDate);
     if (event.endDate <= event.date) {

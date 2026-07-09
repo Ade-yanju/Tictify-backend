@@ -76,6 +76,11 @@ const eventSchema = new mongoose.Schema(
 
     city: { type: String, trim: true, index: true },
 
+    /* Affiliates: organizer opts in and sets the cut (% of ticket
+       price, paid from the organizer's revenue) */
+    affiliatesEnabled: { type: Boolean, default: false },
+    affiliatePercent: { type: Number, min: 1, max: 50, default: 15 },
+
     cancelledAt: Date,
     cancelReason: String,
   },
