@@ -7,6 +7,7 @@ import {
   publishEvent,
   endEvent,
   deleteEvent,
+  updateEvent
 } from "../controllers/event.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
@@ -15,6 +16,7 @@ const router = express.Router();
 
 /* ================= CREATE ================= */
 router.post("/", authenticate, authorize("organizer"), createEvent);
+router.put("/:id", authenticate, authorize("organizer"), updateEvent);
 
 /* ================= ORGANIZER ================= */
 router.get(

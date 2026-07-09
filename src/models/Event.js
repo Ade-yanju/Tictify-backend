@@ -7,6 +7,8 @@ const ticketTypeSchema = new mongoose.Schema(
     quantity: { type: Number, required: true }, // total available
     sold: { type: Number, default: 0 }, // 🔥 track sold tickets
     groupSize: { type: Number, default: 1, min: 1 }, // people admitted per ticket (e.g. Group of Friends x4)
+    earlyBirdPrice: { type: Number, min: 0 }, // optional cheaper price...
+    earlyBirdUntil: { type: Date }, // ...until this moment
   },
   { _id: false },
 );

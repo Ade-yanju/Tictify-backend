@@ -292,13 +292,121 @@ export const adminCancelEvent = async (req, res) => {
       }
     }
 
+    /* 💳 Automated Paystack refunds (fire-and-forget; each guest's
+       card is refunded the full amount they paid, incl. fees) */
+    (async () => {
+      try {
+        const key = process.env.PAYSTACK_SECRET_KEY;
+        if (!key || !key.startsWith("sk_")) return;
+        const payments = await Payment.find({
+          event: event._id,
+          status: "SUCCESS",
+          provider: "PAYSTACK",
+        });
+        for (const pmt of payments) {
+          try {
+            const r = await fetch("https://api.paystack.co/refund", {
+              method: "POST",
+              headers: {
+                Authorization: `Bearer ${key}`,
+                "Content-Type": "application/json",
+              },
+              body: JSON.stringify({ transaction: pmt.reference }),
+            });
+            const data = await r.json();
+            if (data.status) {
+              pmt.status = "REFUNDED";
+              await pmt.save();
+              console.log(`↩️ Refunded ${pmt.reference}`);
+            } else {
+              console.error(`Refund failed ${pmt.reference}: ${data.message}`);
+            }
+          } catch (e) {
+            console.error(`Refund error ${pmt.reference}:`, e.message);
+          }
+        }
+      } catch (e) {
+        console.error("REFUND SWEEP ERROR:", e.message);
+      }
+    })();
+
     return res.json({
-      message: `Event cancelled. ₦${frozen.toLocaleString()} of ₦${revenue.toLocaleString()} revenue held for refunds.`,
+      message: `Event cancelled. ₦${frozen.toLocaleString()} of ₦${revenue.toLocaleString()} revenue held; Paystack refunds started automatically.`,
       revenue,
       frozen,
     });
   } catch (err) {
     console.error("CANCEL EVENT ERROR:", err);
     return res.status(500).json({ message: "Cancellation failed" });
+  }
+};
+
+/* =====================================================
+   ORGANIZER: EDIT EVENT (safe fields only)
+   - basics anytime before the event ends
+   - capacity can't drop below tickets already sold
+   - tier price/quantity/early-bird editable; quantity
+     can't drop below that tier's sold count
+===================================================== */
+export const updateEvent = async (req, res) => {
+  try {
+    const event = await Event.findOne({
+      _id: req.params.id,
+      organizer: req.user._id,
+    });
+    if (!event) return res.status(404).json({ message: "Event not found" });
+    if (["ENDED", "CANCELLED"].includes(event.status)) {
+      return res
+        .status(400)
+        .json({ message: `A ${event.status.toLowerCase()} event can't be edited` });
+    }
+
+    const b = req.body || {};
+    for (const f of ["title", "description", "location", "city", "banner"]) {
+      if (b[f] != null && String(b[f]).trim()) event[f] = String(b[f]).trim();
+    }
+    if (b.category) event.category = b.category;
+    if (b.date) event.date = new Date(b.date);
+    if (b.endDate) event.endDate = new Date(b.endDate);
+    if (event.endDate <= event.date) {
+      return res.status(400).json({ message: "End time must be after start time" });
+    }
+
+    const totalSold = event.ticketTypes.reduce((s, t) => s + (t.sold || 0), 0);
+    if (b.capacity != null) {
+      const cap = parseInt(b.capacity);
+      if (!Number.isInteger(cap) || cap < Math.max(1, totalSold)) {
+        return res.status(400).json({
+          message: `Capacity can't be below tickets already sold (${totalSold})`,
+        });
+      }
+      event.capacity = cap;
+    }
+
+    /* Per-tier edits, matched by name */
+    if (Array.isArray(b.ticketTypes)) {
+      for (const edit of b.ticketTypes) {
+        const tier = event.ticketTypes.find((t) => t.name === edit.name);
+        if (!tier) continue;
+        if (edit.price != null && Number(edit.price) >= 0) tier.price = Number(edit.price);
+        if (edit.quantity != null) {
+          const q = parseInt(edit.quantity);
+          if (Number.isInteger(q) && q >= (tier.sold || 0)) tier.quantity = q;
+        }
+        if (edit.earlyBirdPrice === "" || edit.earlyBirdPrice === null) {
+          tier.earlyBirdPrice = undefined;
+          tier.earlyBirdUntil = undefined;
+        } else if (edit.earlyBirdPrice != null && Number(edit.earlyBirdPrice) >= 0) {
+          tier.earlyBirdPrice = Number(edit.earlyBirdPrice);
+          if (edit.earlyBirdUntil) tier.earlyBirdUntil = new Date(edit.earlyBirdUntil);
+        }
+      }
+    }
+
+    await event.save();
+    return res.json({ message: "Event updated", event });
+  } catch (err) {
+    console.error("UPDATE EVENT ERROR:", err);
+    return res.status(500).json({ message: "Update failed" });
   }
 };

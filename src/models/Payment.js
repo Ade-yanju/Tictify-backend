@@ -64,6 +64,9 @@ const paymentSchema = new mongoose.Schema(
       min: 1,
     },
 
+    discountCode: { type: String, uppercase: true, trim: true },
+    discountAmount: { type: Number, default: 0 }, // ₦ taken off the subtotal
+
     reference: {
       type: String,
       unique: true,
@@ -84,7 +87,7 @@ const paymentSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["PENDING", "SUCCESS", "FAILED"],
+      enum: ["PENDING", "SUCCESS", "FAILED", "REFUNDED"],
       default: "PENDING",
       index: true,
     },

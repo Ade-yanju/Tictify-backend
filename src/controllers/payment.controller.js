@@ -5,6 +5,21 @@ import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
+import { resolveDiscount } from "./discount.controller.js";
+
+/* Early-bird: a tier can carry a cheaper price until a cutoff */
+export function effectivePrice(tier, at = new Date()) {
+  if (
+    tier &&
+    tier.earlyBirdPrice != null &&
+    tier.earlyBirdPrice >= 0 &&
+    tier.earlyBirdUntil &&
+    new Date(tier.earlyBirdUntil) > at
+  ) {
+    return Number(tier.earlyBirdPrice);
+  }
+  return Number(tier?.price || 0);
+}
 
 /* =====================================================
    FEES
@@ -43,12 +58,43 @@ export const quoteFees = async (req, res) => {
         platformFee: 0, processingFee: 0, total: 0,
       });
     }
-    const subtotal = Math.round(price) * qty;
+    /* When eventId+ticketType are supplied, the server resolves the
+       real (early-bird aware) unit price and any discount code —
+       the client-supplied price is ignored. */
+    let unit = Math.round(price);
+    let discountAmount = 0;
+    let discountApplied = null;
+    const { eventId, ticketType, code } = req.query;
+    if (eventId && ticketType) {
+      const ev = await Event.findById(eventId);
+      const tier = ev?.ticketTypes.find((t) => t.name === ticketType);
+      if (tier) unit = effectivePrice(tier);
+      if (ev && code) {
+        const d = await resolveDiscount(ev._id, code);
+        if (d) {
+          discountApplied = { code: d.code, percentOff: d.percentOff };
+        } else {
+          return res.status(404).json({ message: "Invalid or exhausted discount code" });
+        }
+      }
+    }
+
+    let subtotal = unit * qty;
+    if (discountApplied) {
+      discountAmount = Math.round((subtotal * discountApplied.percentOff) / 100);
+      subtotal -= discountAmount;
+    }
+    if (subtotal <= 0) {
+      return res.json({ ticketPrice: unit, quantity: qty, subtotal: 0, discountAmount,
+        discount: discountApplied, platformFee: 0, processingFee: 0, total: 0 });
+    }
     const fees = computeFees(subtotal);
     return res.json({
-      ticketPrice: Math.round(price),
+      ticketPrice: unit,
       quantity: qty,
       subtotal,
+      discountAmount,
+      discount: discountApplied,
       platformFee: fees.platformFee,
       processingFee: fees.processingFee,
       total: fees.total,
@@ -131,8 +177,29 @@ export const initiatePayment = async (req, res) => {
       });
     }
 
-    const ticketPrice = Number(ticketConfig.price);
+    const ticketPrice = effectivePrice(ticketConfig);
     const reference = `TICTIFY-${crypto.randomBytes(10).toString("hex")}`;
+
+    /* Discount code: validate + atomically consume one use */
+    let discountAmount = 0;
+    let discountCode;
+    if (req.body.discountCode) {
+      const d = await resolveDiscount(event._id, req.body.discountCode);
+      if (!d) {
+        return res.status(400).json({ message: "Invalid or exhausted discount code" });
+      }
+      const { default: DiscountCode } = await import("../models/DiscountCode.js");
+      const claimed = await DiscountCode.findOneAndUpdate(
+        { _id: d._id, active: true, $expr: { $lt: ["$uses", "$maxUses"] } },
+        { $inc: { uses: 1 } },
+        { new: true },
+      );
+      if (!claimed) {
+        return res.status(400).json({ message: "Discount code just sold out" });
+      }
+      discountCode = claimed.code;
+      discountAmount = Math.round((ticketPrice * qty * claimed.percentOff) / 100);
+    }
 
     /* ================= FREE EVENT ================= */
     if (ticketPrice === 0) {
@@ -180,8 +247,8 @@ export const initiatePayment = async (req, res) => {
     }
 
     /* ================= PAID EVENT (PAYSTACK) ================= */
-    // Fees are computed once on the ORDER subtotal (price × qty)
-    const subtotal = ticketPrice * qty;
+    // Fees are computed once on the ORDER subtotal (price × qty − discount)
+    const subtotal = ticketPrice * qty - discountAmount;
     const fees = computeFees(subtotal);
     const platformFee = fees.platformFee;
     const totalAmount = fees.total;
@@ -198,6 +265,8 @@ export const initiatePayment = async (req, res) => {
       organizerAmount: subtotal,
       promoter,
       quantity: qty,
+      discountCode,
+      discountAmount,
       status: "PENDING",
       provider: "PAYSTACK",
     });

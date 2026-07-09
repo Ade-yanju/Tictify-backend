@@ -181,6 +181,8 @@ export const adminApproveAmbassador = async (req, res) => {
             </p>
           </div>
 
+          ${process.env.AMBASSADOR_COMMUNITY_URL ? `<p style="margin:14px 0 4px;color:#555;">👥 <a href="${process.env.AMBASSADOR_COMMUNITY_URL}" style="color:#B8952E;font-weight:bold;">Join the Campus Partners community</a></p>` : ""}
+          ${process.env.AMBASSADOR_TRAINING_URL ? `<p style="margin:4px 0 14px;color:#555;">📚 <a href="${process.env.AMBASSADOR_TRAINING_URL}" style="color:#B8952E;font-weight:bold;">Complete your training</a></p>` : ""}
           <a href="${FRONTEND}/login" style="display:inline-block;background:#E8C96A;color:#000;padding:13px 28px;border-radius:50px;text-decoration:none;font-weight:bold;">Log in to your dashboard</a>
           <p style="font-size:12px;color:#999;margin-top:26px;">© ${new Date().getFullYear()} Tictify Campus Partners</p>
         </div>
@@ -270,5 +272,98 @@ export const ambassadorDashboard = async (req, res) => {
   } catch (err) {
     console.error("AMBASSADOR DASHBOARD ERROR:", err);
     return res.status(500).json({ message: "Failed to load dashboard" });
+  }
+};
+
+/* =====================================================
+   ADMIN: LEADERBOARD — every approved ambassador ranked
+   by real impact (sales, onboarding, commission)
+===================================================== */
+export const adminAmbassadorLeaderboard = async (req, res) => {
+  try {
+    const Wallet = (await import("../models/Wallet.js")).default;
+    const ambassadors = await Ambassador.find({
+      status: { $in: ["APPROVED", "REVOKED"] },
+    }).lean();
+    const codes = ambassadors.map((a) => a.inviteCode).filter(Boolean);
+    const userIds = ambassadors.map((a) => a.user).filter(Boolean);
+
+    const [sales, onboarded, wallets] = await Promise.all([
+      Payment.aggregate([
+        { $match: { promoter: { $in: codes }, status: "SUCCESS" } },
+        {
+          $group: {
+            _id: "$promoter",
+            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+            revenue: { $sum: "$organizerAmount" },
+          },
+        },
+      ]),
+      User.aggregate([
+        { $match: { referredBy: { $in: codes }, role: "organizer" } },
+        { $group: { _id: "$referredBy", count: { $sum: 1 } } },
+      ]),
+      Wallet.find({ organizer: { $in: userIds } }).lean(),
+    ]);
+
+    const salesBy = Object.fromEntries(sales.map((s) => [s._id, s]));
+    const onbBy = Object.fromEntries(onboarded.map((o) => [o._id, o.count]));
+    const walletBy = Object.fromEntries(
+      wallets.map((w) => [w.organizer.toString(), w]),
+    );
+
+    const rows = ambassadors
+      .map((a) => ({
+        id: a._id,
+        fullName: a.fullName,
+        university: a.university,
+        inviteCode: a.inviteCode,
+        status: a.status,
+        ticketsSold: salesBy[a.inviteCode]?.ticketsSold || 0,
+        revenue: salesBy[a.inviteCode]?.revenue || 0,
+        organizersOnboarded: onbBy[a.inviteCode] || 0,
+        commissionEarned: walletBy[a.user?.toString()]?.totalEarnings || 0,
+      }))
+      .sort((x, y) => y.revenue - x.revenue);
+
+    return res.json(rows);
+  } catch (err) {
+    console.error("LEADERBOARD ERROR:", err);
+    return res.status(500).json({ message: "Failed to load leaderboard" });
+  }
+};
+
+/* =====================================================
+   ADMIN: REVOKE / REINSTATE
+   Revoke = login disabled + commissions stop accruing
+   (held wallet balance stays intact for payout review)
+===================================================== */
+export const adminRevokeAmbassador = async (req, res) => {
+  try {
+    const app = await Ambassador.findOneAndUpdate(
+      { _id: req.params.id, status: "APPROVED" },
+      { status: "REVOKED", processedBy: req.user._id, processedAt: new Date() },
+      { new: true },
+    );
+    if (!app) return res.status(400).json({ message: "Not an active ambassador" });
+    if (app.user) await User.updateOne({ _id: app.user }, { isActive: false });
+    return res.json({ message: `${app.fullName} revoked — login disabled, commissions stopped` });
+  } catch (err) {
+    return res.status(500).json({ message: "Revoke failed" });
+  }
+};
+
+export const adminReinstateAmbassador = async (req, res) => {
+  try {
+    const app = await Ambassador.findOneAndUpdate(
+      { _id: req.params.id, status: "REVOKED" },
+      { status: "APPROVED", processedBy: req.user._id, processedAt: new Date() },
+      { new: true },
+    );
+    if (!app) return res.status(400).json({ message: "Not a revoked ambassador" });
+    if (app.user) await User.updateOne({ _id: app.user }, { isActive: true });
+    return res.json({ message: `${app.fullName} reinstated` });
+  } catch (err) {
+    return res.status(500).json({ message: "Reinstate failed" });
   }
 };

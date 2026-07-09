@@ -21,7 +21,7 @@ const ambassadorSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["APPLIED", "APPROVED", "REJECTED"],
+      enum: ["APPLIED", "APPROVED", "REJECTED", "REVOKED"],
       default: "APPLIED",
       index: true,
     },

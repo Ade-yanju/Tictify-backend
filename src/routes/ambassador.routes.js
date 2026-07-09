@@ -6,6 +6,9 @@ import {
   adminApproveAmbassador,
   adminRejectAmbassador,
   ambassadorDashboard,
+  adminAmbassadorLeaderboard,
+  adminRevokeAmbassador,
+  adminReinstateAmbassador,
 } from "../controllers/ambassador.controller.js";
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 
@@ -28,6 +31,9 @@ router.get("/me", authenticate, authorize("ambassador"), ambassadorDashboard);
 
 /* ── ADMIN: review pipeline ── */
 router.get("/", authenticate, authorize("admin"), adminListAmbassadors);
+router.get("/leaderboard", authenticate, authorize("admin"), adminAmbassadorLeaderboard);
+router.patch("/:id/revoke", authenticate, authorize("admin"), adminRevokeAmbassador);
+router.patch("/:id/reinstate", authenticate, authorize("admin"), adminReinstateAmbassador);
 router.patch("/:id/approve", authenticate, authorize("admin"), adminApproveAmbassador);
 router.patch("/:id/reject", authenticate, authorize("admin"), adminRejectAmbassador);
 
