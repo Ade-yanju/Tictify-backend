@@ -8,6 +8,7 @@ import {
   getAdminOrganizers,
   getAdminEvents,
 } from "../controllers/admin.controller.js";
+import { adminCancelEvent } from "../controllers/event.controller.js";
 
 const router = express.Router();
 
@@ -22,6 +23,7 @@ router.get("/organizers", authenticate, adminOnly, getAdminOrganizers);
 
 /* ================= EVENTS ================= */
 router.get("/events", authenticate, adminOnly, getAdminEvents);
+router.patch("/events/:id/cancel", authenticate, adminOnly, adminCancelEvent);
 
 /* NOTE: /withdrawals (list, approve, reject) lives in
    admin.withdrawal.routes.js — do not redefine it here.

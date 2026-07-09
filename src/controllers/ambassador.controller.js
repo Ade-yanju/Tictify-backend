@@ -238,18 +238,21 @@ export const ambassadorDashboard = async (req, res) => {
       return res.status(404).json({ message: "Ambassador profile not found" });
     }
 
-    const [organizersOnboarded, salesAgg] = await Promise.all([
+    const [organizersOnboarded, salesAgg, wallet] = await Promise.all([
       User.countDocuments({ referredBy: profile.inviteCode, role: "organizer" }),
       Payment.aggregate([
         { $match: { promoter: profile.inviteCode, status: "SUCCESS" } },
         {
           $group: {
             _id: null,
-            ticketsSold: { $sum: 1 },
+            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
             revenue: { $sum: "$organizerAmount" },
           },
         },
       ]),
+      (await import("../models/Wallet.js")).default.findOne({
+        organizer: req.user._id,
+      }),
     ]);
 
     return res.json({
@@ -260,6 +263,8 @@ export const ambassadorDashboard = async (req, res) => {
         organizersOnboarded,
         ticketsSold: salesAgg[0]?.ticketsSold || 0,
         salesRevenue: salesAgg[0]?.revenue || 0,
+        commissionBalance: wallet?.balance || 0,
+        commissionEarned: wallet?.totalEarnings || 0,
       },
     });
   } catch (err) {

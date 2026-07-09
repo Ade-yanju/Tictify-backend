@@ -26,17 +26,33 @@ export function computeFees(ticketPrice) {
   };
 }
 
-/* Public quote — checkout shows this exact breakdown */
+/* Public quote — checkout shows this exact breakdown.
+   qty (1-10) multiplies the ticket price; fees are computed once
+   on the ORDER subtotal, so buying 3 tickets in one go is cheaper
+   than three separate checkouts. */
 export const quoteFees = async (req, res) => {
   try {
     const price = Number(req.query.price);
+    const qty = Math.min(10, Math.max(1, parseInt(req.query.qty) || 1));
     if (!Number.isFinite(price) || price < 0) {
       return res.status(400).json({ message: "Invalid price" });
     }
     if (price === 0) {
-      return res.json({ ticketPrice: 0, platformFee: 0, processingFee: 0, total: 0 });
+      return res.json({
+        ticketPrice: 0, quantity: qty, subtotal: 0,
+        platformFee: 0, processingFee: 0, total: 0,
+      });
     }
-    return res.json(computeFees(Math.round(price)));
+    const subtotal = Math.round(price) * qty;
+    const fees = computeFees(subtotal);
+    return res.json({
+      ticketPrice: Math.round(price),
+      quantity: qty,
+      subtotal,
+      platformFee: fees.platformFee,
+      processingFee: fees.processingFee,
+      total: fees.total,
+    });
   } catch {
     return res.status(500).json({ message: "Quote failed" });
   }
@@ -87,9 +103,16 @@ export const initiatePayment = async (req, res) => {
       return res.status(400).json({ message: "Invalid ticket type" });
     }
 
-    /* 4️⃣ ENFORCE QUANTITY */
-    if (ticketConfig.sold >= ticketConfig.quantity) {
-      return res.status(400).json({ message: "This ticket type is sold out" });
+    /* 4️⃣ ENFORCE QUANTITY (buyer can take 1-10 tickets per order) */
+    const qty = Math.min(10, Math.max(1, parseInt(req.body.quantity) || 1));
+    const tierRemaining = ticketConfig.quantity - (ticketConfig.sold || 0);
+    if (tierRemaining < qty) {
+      return res.status(400).json({
+        message:
+          tierRemaining <= 0
+            ? "This ticket type is sold out"
+            : `Only ${tierRemaining} ${ticketType} ticket${tierRemaining > 1 ? "s" : ""} left`,
+      });
     }
 
     /* 5️⃣ ENFORCE EVENT CAPACITY */
@@ -97,10 +120,15 @@ export const initiatePayment = async (req, res) => {
       (sum, t) => sum + (t.sold || 0),
       0,
     );
-    if (totalSold >= event.capacity) {
-      event.status = "ENDED";
-      await event.save();
-      return res.status(400).json({ message: "Event is sold out" });
+    if (totalSold + qty > event.capacity) {
+      const left = Math.max(0, event.capacity - totalSold);
+      if (left === 0) {
+        event.status = "ENDED";
+        await event.save();
+      }
+      return res.status(400).json({
+        message: left === 0 ? "Event is sold out" : `Only ${left} spots left for this event`,
+      });
     }
 
     const ticketPrice = Number(ticketConfig.price);
@@ -111,7 +139,7 @@ export const initiatePayment = async (req, res) => {
       const qrCode = crypto.randomBytes(16).toString("hex");
       const qrImage = await QRCode.toDataURL(qrCode);
 
-      ticketConfig.sold += 1;
+      ticketConfig.sold += qty;
       await event.save();
 
       await Payment.create({
@@ -124,6 +152,7 @@ export const initiatePayment = async (req, res) => {
         platformFee: 0,
         organizerAmount: 0,
         promoter,
+        quantity: qty,
         status: "SUCCESS",
         provider: "FREE",
       });
@@ -139,7 +168,8 @@ export const initiatePayment = async (req, res) => {
         amountPaid: 0,
         currency: "NGN",
         scanned: false,
-        groupSize: Math.max(1, ticketConfig.groupSize || 1),
+        // one QR admits (tickets bought × people per ticket)
+        groupSize: qty * Math.max(1, ticketConfig.groupSize || 1),
         admittedCount: 0,
       });
 
@@ -150,7 +180,9 @@ export const initiatePayment = async (req, res) => {
     }
 
     /* ================= PAID EVENT (PAYSTACK) ================= */
-    const fees = computeFees(ticketPrice);
+    // Fees are computed once on the ORDER subtotal (price × qty)
+    const subtotal = ticketPrice * qty;
+    const fees = computeFees(subtotal);
     const platformFee = fees.platformFee;
     const totalAmount = fees.total;
 
@@ -163,8 +195,9 @@ export const initiatePayment = async (req, res) => {
       amount: totalAmount,
       platformFee,
       processingFee: fees.processingFee,
-      organizerAmount: ticketPrice,
+      organizerAmount: subtotal,
       promoter,
+      quantity: qty,
       status: "PENDING",
       provider: "PAYSTACK",
     });
@@ -292,6 +325,7 @@ export const paymentCallback = async (req, res) => {
       (t) => t.name === payment.ticketType,
     );
 
+    const paidQty = Math.max(1, payment.quantity || 1);
     await Ticket.create({
       event: payment.event,
       organizer: payment.organizer,
@@ -303,13 +337,13 @@ export const paymentCallback = async (req, res) => {
       amountPaid: payment.organizerAmount,
       currency: "NGN",
       scanned: false,
-      groupSize: Math.max(1, tierConfig?.groupSize || 1),
+      groupSize: paidQty * Math.max(1, tierConfig?.groupSize || 1),
       admittedCount: 0,
     });
 
     if (event) {
       const ticketConfig = tierConfig;
-      if (ticketConfig) ticketConfig.sold += 1;
+      if (ticketConfig) ticketConfig.sold += paidQty;
 
       const totalSold = event.ticketTypes.reduce(
         (sum, t) => sum + (t.sold || 0),
@@ -334,6 +368,13 @@ export const paymentCallback = async (req, res) => {
     );
 
     console.log(`✅ Payment processed & wallet credited: ${reference}`);
+
+    // 💸 Ambassador 5% commission (non-blocking, idempotent)
+    import("../services/commission.service.js")
+      .then(({ creditAmbassadorCommission }) =>
+        creditAmbassadorCommission(payment),
+      )
+      .catch(() => {});
     return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
   } catch (err) {
     console.error("PAYMENT CALLBACK ERROR:", err);

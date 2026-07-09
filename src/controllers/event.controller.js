@@ -50,6 +50,8 @@ export const createEvent = async (req, res) => {
       })),
       status,
       banner,
+      category: req.body.category || "Other",
+      city: String(req.body.city || "").trim(),
     });
 
     // 🔔 New LIVE event → push alert to subscribed guests (fire-and-forget)
@@ -229,5 +231,74 @@ export const deleteEvent = async (req, res) => {
   } catch (err) {
     console.error("DELETE EVENT ERROR:", err);
     res.status(500).json({ message: "Unable to delete event" });
+  }
+};
+
+/* =====================================================
+   ADMIN: CANCEL EVENT
+   - blocks further sales (status guard) and gate scans
+   - claws back this event's revenue from the organizer's
+     wallet (up to their current balance) so refunds can
+     be honoured; every kobo is audit-logged
+===================================================== */
+export const adminCancelEvent = async (req, res) => {
+  try {
+    const event = await Event.findOneAndUpdate(
+      { _id: req.params.id, status: { $in: ["LIVE", "DRAFT"] } },
+      {
+        status: "CANCELLED",
+        cancelledAt: new Date(),
+        cancelReason: String(req.body?.reason || "").slice(0, 300),
+      },
+      { new: true },
+    );
+    if (!event) {
+      return res
+        .status(400)
+        .json({ message: "Event not found or already ended/cancelled" });
+    }
+
+    const [{ default: Payment }, { default: Wallet }, { default: WalletTransaction }] =
+      await Promise.all([
+        import("../models/Payment.js"),
+        import("../models/Wallet.js"),
+        import("../models/WalletTransaction.js"),
+      ]);
+
+    /* Revenue this event put into the organizer's wallet */
+    const agg = await Payment.aggregate([
+      { $match: { event: event._id, status: "SUCCESS" } },
+      { $group: { _id: null, revenue: { $sum: "$organizerAmount" } } },
+    ]);
+    const revenue = agg[0]?.revenue || 0;
+
+    let frozen = 0;
+    if (revenue > 0) {
+      /* Atomic: never push the wallet negative — claw back what's there */
+      const wallet = await Wallet.findOne({ organizer: event.organizer });
+      frozen = Math.min(wallet?.balance || 0, revenue);
+      if (frozen > 0) {
+        await Wallet.updateOne(
+          { organizer: event.organizer, balance: { $gte: frozen } },
+          { $inc: { balance: -frozen } },
+        );
+        await WalletTransaction.create({
+          organizer: event.organizer,
+          type: "DEBIT",
+          amount: frozen,
+          reference: `CANCEL-${event._id}`,
+          description: `Event "${event.title}" cancelled — ₦${frozen.toLocaleString()} held for guest refunds`,
+        });
+      }
+    }
+
+    return res.json({
+      message: `Event cancelled. ₦${frozen.toLocaleString()} of ₦${revenue.toLocaleString()} revenue held for refunds.`,
+      revenue,
+      frozen,
+    });
+  } catch (err) {
+    console.error("CANCEL EVENT ERROR:", err);
+    return res.status(500).json({ message: "Cancellation failed" });
   }
 };

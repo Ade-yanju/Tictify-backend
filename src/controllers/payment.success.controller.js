@@ -65,6 +65,13 @@ export const paymentSuccess = async (req, res) => {
       { upsert: true, new: true },
     );
 
+    // 💸 Ambassador 5% commission (non-blocking, idempotent)
+    import("../services/commission.service.js")
+      .then(({ creditAmbassadorCommission }) =>
+        creditAmbassadorCommission(payment),
+      )
+      .catch(() => {});
+
     /* 📧 Ticket confirmation email (non-blocking) */
     try {
       const eventName = event?.title || "Your Event";

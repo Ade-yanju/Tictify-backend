@@ -1,0 +1,16 @@
+# Keeps the free-tier Render backend awake so guests never hit a
+# 30-60s cold start mid-checkout. Runs every 10 minutes; GitHub
+# Actions is free for public repos.
+name: Keep backend awake
+on:
+  schedule:
+    - cron: "*/10 * * * *"
+  workflow_dispatch:
+jobs:
+  ping:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Ping backend
+        run: |
+          curl -sS -o /dev/null -w "backend %{http_code} in %{time_total}s\n" \
+            --max-time 90 https://tictify-backend.onrender.com/api/events || true

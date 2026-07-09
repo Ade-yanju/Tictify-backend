@@ -51,9 +51,31 @@ const eventSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["DRAFT", "LIVE", "ENDED"],
+      enum: ["DRAFT", "LIVE", "ENDED", "CANCELLED"],
       default: "DRAFT",
     },
+
+    /* Discovery: "what's happening this weekend?" */
+    category: {
+      type: String,
+      enum: [
+        "Nightlife",
+        "Comedy",
+        "Concert",
+        "Sports",
+        "Workshop",
+        "Festival",
+        "Campus",
+        "Other",
+      ],
+      default: "Other",
+      index: true,
+    },
+
+    city: { type: String, trim: true, index: true },
+
+    cancelledAt: Date,
+    cancelReason: String,
   },
   { timestamps: true },
 );

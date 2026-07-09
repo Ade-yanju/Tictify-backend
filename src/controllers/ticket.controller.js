@@ -384,6 +384,13 @@ export const scanTicketController = async (req, res) => {
       return res.status(404).json({ message: "Ticket not found" });
     }
 
+    /* ── Cancelled events admit nobody ── */
+    if (found.event?.status === "CANCELLED") {
+      return res.status(410).json({
+        message: "This event was cancelled — ticket is not valid for entry",
+      });
+    }
+
     /* ── Ownership: only this event's organizer may admit ── */
     const eventOrganizer =
       found.event?.organizer?.toString() || found.organizer?.toString();

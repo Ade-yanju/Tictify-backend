@@ -242,7 +242,8 @@ export const handlePaymentWebhook = async (req, res) => {
         const tierConfig = eventDoc?.ticketTypes.find(
           (t) => t.name === payment.ticketType,
         );
-        const groupSize = Math.max(1, tierConfig?.groupSize || 1);
+        const paidQty = Math.max(1, payment.quantity || 1);
+        const groupSize = paidQty * Math.max(1, tierConfig?.groupSize || 1);
 
         await Ticket.create(
           [
@@ -268,7 +269,7 @@ export const handlePaymentWebhook = async (req, res) => {
         const event = eventDoc;
         if (event) {
           const ticketConfig = tierConfig;
-          if (ticketConfig) ticketConfig.sold += 1;
+          if (ticketConfig) ticketConfig.sold += paidQty;
 
           const totalSold = event.ticketTypes.reduce(
             (sum, t) => sum + (t.sold || 0),
@@ -296,6 +297,13 @@ export const handlePaymentWebhook = async (req, res) => {
         await wallet.save({ session });
 
         console.log(`✅ Ticket + wallet credited via webhook: ${reference}`);
+
+        // 💸 Ambassador 5% commission (non-blocking, idempotent)
+        import("../services/commission.service.js")
+          .then(({ creditAmbassadorCommission }) =>
+            creditAmbassadorCommission(payment),
+          )
+          .catch(() => {});
       }
     });
 

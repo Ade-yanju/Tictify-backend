@@ -58,6 +58,12 @@ const paymentSchema = new mongoose.Schema(
       index: true,
     },
 
+    quantity: {
+      type: Number, // tickets bought in this single order
+      default: 1,
+      min: 1,
+    },
+
     reference: {
       type: String,
       unique: true,

@@ -19,6 +19,7 @@ import adminWithdrawalRoutes from "./routes/admin.withdrawal.routes.js";
 import walletRoutes from "./routes/wallet.routes.js";
 import notificationRoutes from "./routes/notification.routes.js";
 import ambassadorRoutes from "./routes/ambassador.routes.js";
+import uploadRoutes from "./routes/upload.routes.js";
 
 const app = express();
 
@@ -71,6 +72,7 @@ app.use("/api/admin", adminWithdrawalRoutes);
 app.use("/api/organizer/wallet", walletRoutes);
 app.use("/api/notifications", notificationRoutes);
 app.use("/api/ambassadors", ambassadorRoutes);
+app.use("/api/uploads", uploadRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;
