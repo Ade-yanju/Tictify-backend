@@ -21,10 +21,44 @@ const FROM_NAME = process.env.EMAIL_FROM_NAME || "Tictify";
 const providers = {
   resend: createResendProvider,
   mailtrap: createMailtrapProvider,
+  infobip: createInfobipProvider,
   sendgrid: createSendGridProvider,
   mailgun: createMailgunProvider,
   smtp: createSMTPProvider,
 };
+
+/* Infobip Email API — backup provider.
+   Needs INFOBIP_API_KEY + INFOBIP_BASE_URL (your personal
+   subdomain, e.g. https://xxxxx.api.infobip.com); the sender
+   domain must be verified in the Infobip dashboard. */
+function createInfobipProvider() {
+  const key = process.env.INFOBIP_API_KEY;
+  const base = String(process.env.INFOBIP_BASE_URL || "").replace(/\/+$/, "");
+  if (!configured(key, base)) return null;
+
+  return {
+    name: "Infobip",
+    send: async ({ to, subject, html }) => {
+      const form = new FormData();
+      form.append("from", `${FROM_NAME} <${FROM_EMAIL}>`);
+      form.append("to", to);
+      form.append("subject", subject);
+      form.append("html", html);
+
+      const response = await fetch(`${base}/email/3/send`, {
+        method: "POST",
+        headers: { Authorization: `App ${key}` },
+        body: form,
+      });
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Infobip error: ${response.status} ${detail.slice(0, 140)}`);
+      }
+      return await response.json();
+    },
+  };
+}
 
 /* Mailtrap Email Sending (free tier ~150/day) — REST API.
    NOTE: this is the production "Email Sending" product, not the
