@@ -7,9 +7,9 @@ export const register = async (req, res) => {
     const { name, password, role } = req.body;
     const email = String(req.body.email || "").trim().toLowerCase();
 
-    if (!["organizer", "affiliate"].includes(role)) {
+    if (role !== "organizer") {
       return res.status(403).json({
-        message: "Only organizers and affiliates can register",
+        message: "Only organizers can register here — affiliates join at /affiliate",
       });
     }
 
