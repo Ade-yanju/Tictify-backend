@@ -23,10 +23,74 @@ const providers = {
   mailtrap: createMailtrapProvider,
   infobip: createInfobipProvider,
   mailjet: createMailjetProvider,
+  sendpulse: createSendPulseProvider,
   sendgrid: createSendGridProvider,
   mailgun: createMailgunProvider,
   smtp: createSMTPProvider,
 };
+
+/* SendPulse REST API (their github lib wraps exactly this flow):
+   OAuth2 client-credentials token from API ID + Secret, then
+   POST /smtp/emails with base64 html. NOTE: requires the SMTP
+   service to be ACTIVATED on the SendPulse account — the API
+   shares the same activation gate as plain SMTP. */
+let spToken = null;
+let spTokenExp = 0;
+
+async function sendpulseToken(id, secret) {
+  if (spToken && Date.now() < spTokenExp - 60_000) return spToken;
+  const r = await fetch("https://api.sendpulse.com/oauth/access_token", {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify({
+      grant_type: "client_credentials",
+      client_id: id,
+      client_secret: secret,
+    }),
+  });
+  const d = await r.json();
+  if (!d.access_token) throw new Error("SendPulse auth failed");
+  spToken = d.access_token;
+  spTokenExp = Date.now() + (d.expires_in || 3600) * 1000;
+  return spToken;
+}
+
+function createSendPulseProvider() {
+  const id = process.env.SENDPULSE_API_USER_ID;
+  const secret = process.env.SENDPULSE_API_SECRET;
+  if (!configured(id, secret)) return null;
+
+  return {
+    name: "SendPulse",
+    send: async ({ to, subject, html }) => {
+      const token = await sendpulseToken(id, secret);
+      const response = await fetch("https://api.sendpulse.com/smtp/emails", {
+        method: "POST",
+        headers: {
+          Authorization: `Bearer ${token}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          email: {
+            html: Buffer.from(html).toString("base64"),
+            text: "View this email in an HTML-capable client.",
+            subject,
+            from: { name: FROM_NAME, email: FROM_EMAIL },
+            to: [{ email: to }],
+          },
+        }),
+      });
+      const data = await response.json().catch(() => ({}));
+      if (!response.ok || data.result === false) {
+        spToken = null; // force re-auth next attempt
+        throw new Error(
+          `SendPulse error: ${response.status} ${JSON.stringify(data).slice(0, 140)}`,
+        );
+      }
+      return data;
+    },
+  };
+}
 
 /* Mailjet (free tier: 200/day, 6,000/mo) — REST v3.1.
    Needs MAILJET_API_KEY + MAILJET_SECRET_KEY (Basic auth);
