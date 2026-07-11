@@ -22,10 +22,54 @@ const providers = {
   resend: createResendProvider,
   mailtrap: createMailtrapProvider,
   infobip: createInfobipProvider,
+  mailjet: createMailjetProvider,
   sendgrid: createSendGridProvider,
   mailgun: createMailgunProvider,
   smtp: createSMTPProvider,
 };
+
+/* Mailjet (free tier: 200/day, 6,000/mo) — REST v3.1.
+   Needs MAILJET_API_KEY + MAILJET_SECRET_KEY (Basic auth);
+   sender domain must be validated in the Mailjet dashboard. */
+function createMailjetProvider() {
+  const key = process.env.MAILJET_API_KEY;
+  const secret = process.env.MAILJET_SECRET_KEY;
+  if (!configured(key, secret)) return null;
+
+  return {
+    name: "Mailjet",
+    send: async ({ to, subject, html }) => {
+      const response = await fetch("https://api.mailjet.com/v3.1/send", {
+        method: "POST",
+        headers: {
+          Authorization: `Basic ${Buffer.from(`${key}:${secret}`).toString("base64")}`,
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          Messages: [
+            {
+              From: { Email: FROM_EMAIL, Name: FROM_NAME },
+              To: [{ Email: to }],
+              Subject: subject,
+              HTMLPart: html,
+            },
+          ],
+        }),
+      });
+
+      if (!response.ok) {
+        const detail = await response.text().catch(() => "");
+        throw new Error(`Mailjet error: ${response.status} ${detail.slice(0, 140)}`);
+      }
+      const data = await response.json();
+      const msg = data?.Messages?.[0];
+      if (msg && msg.Status !== "success") {
+        throw new Error(`Mailjet rejected: ${JSON.stringify(msg.Errors || msg.Status).slice(0, 140)}`);
+      }
+      return data;
+    },
+  };
+}
 
 /* Infobip Email API — backup provider.
    Needs INFOBIP_API_KEY + INFOBIP_BASE_URL (your personal
