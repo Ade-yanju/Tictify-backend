@@ -56,6 +56,7 @@ app.use(
    this must be registered BEFORE express.json() or the signature
    check receives a parsed object and always fails. */
 app.use("/api/webhooks", express.raw({ type: "application/json" }));
+app.use("/api/payments/webhook", express.raw({ type: "application/json" }));
 
 app.use(express.json());
 

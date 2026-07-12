@@ -166,3 +166,57 @@ export const adminFinance = async (req, res) => {
     return res.status(500).json({ message: "Failed to load finance data" });
   }
 };
+
+
+/* =====================================================
+   🔄 RECONCILE PENDING PAYMENTS
+   Verifies every PENDING Paystack payment older than
+   10 minutes against Paystack and completes the paid
+   ones (ticket + QR + wallet + email) by replaying the
+   callback path. Safe: unpaid refs are left untouched.
+===================================================== */
+export const adminReconcilePending = async (req, res) => {
+  try {
+    const { default: Payment } = await import("../models/Payment.js");
+    const BACKEND =
+      process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
+
+    const pending = await Payment.find({
+      status: "PENDING",
+      provider: "PAYSTACK",
+      createdAt: { $lt: new Date(Date.now() - 10 * 60 * 1000) },
+    })
+      .sort("-createdAt")
+      .limit(100);
+
+    const results = [];
+    for (const pmt of pending) {
+      try {
+        const r = await fetch(
+          `${BACKEND}/api/payments/callback?reference=${pmt.reference}`,
+          { redirect: "manual" },
+        );
+        const dest = r.headers.get("location") || "";
+        results.push({
+          reference: pmt.reference,
+          email: pmt.email,
+          amount: pmt.amount,
+          recovered: dest.includes("/success/"),
+        });
+      } catch (e) {
+        results.push({ reference: pmt.reference, recovered: false, error: e.message });
+      }
+    }
+
+    const recovered = results.filter((x) => x.recovered).length;
+    return res.json({
+      checked: results.length,
+      recovered,
+      stillUnpaid: results.length - recovered,
+      results,
+    });
+  } catch (err) {
+    console.error("RECONCILE ERROR:", err);
+    return res.status(500).json({ message: "Reconcile failed" });
+  }
+};
