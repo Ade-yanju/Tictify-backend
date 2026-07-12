@@ -41,6 +41,14 @@ const eventSchema = new mongoose.Schema(
       required: true,
     },
 
+    /* How the banner displays: "cover" fills the frame (crops the
+       edges), "contain" shows the whole flyer on a blurred backdrop */
+    bannerFit: {
+      type: String,
+      enum: ["cover", "contain"],
+      default: "cover",
+    },
+
     capacity: {
       type: Number,
       required: true,
