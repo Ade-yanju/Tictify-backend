@@ -60,6 +60,11 @@ app.use("/api/payments/webhook", express.raw({ type: "application/json" }));
 
 app.use(express.json());
 
+/* Version-stamped health check — proves which build is serving */
+app.get("/api/health", (req, res) =>
+  res.json({ ok: true, version: "dashboard-stats-v2" }),
+);
+
 /* ================= ROUTES ================= */
 app.use("/api/auth", authRoutes);
 app.use("/api/dashboard", dashboardRoutes);
