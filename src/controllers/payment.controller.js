@@ -288,7 +288,7 @@ export const initiatePayment = async (req, res) => {
           email,
           reference,
           currency: "NGN",
-          callback_url: `${process.env.BACKEND_URL}/api/payments/callback`,
+          callback_url: `${process.env.BACKEND_URL || "https://tictify-backend.onrender.com"}/api/payments/callback`,
           metadata: { eventId, ticketType, email, customerName: name },
         }),
       },
