@@ -62,7 +62,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "dashboard-stats-v2" }),
+  res.json({ ok: true, version: "org-dashboard-v3" }),
 );
 
 /* ================= ROUTES ================= */
