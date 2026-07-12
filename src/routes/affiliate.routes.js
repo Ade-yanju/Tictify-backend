@@ -186,7 +186,7 @@ router.get("/events", authenticate, authorize("affiliate"), async (req, res) => 
       affiliatesEnabled: true,
       date: { $gt: new Date() },
     })
-      .select("title banner date location city category affiliatePercent ticketTypes")
+      .select("title banner bannerFit date location city category affiliatePercent ticketTypes")
       .sort("date")
       .limit(100)
       .lean();
@@ -196,6 +196,7 @@ router.get("/events", authenticate, authorize("affiliate"), async (req, res) => 
         _id: e._id,
         title: e.title,
         banner: e.banner,
+        bannerFit: e.bannerFit || "cover",
         date: e.date,
         location: e.location,
         city: e.city,
