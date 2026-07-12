@@ -6,6 +6,7 @@ import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 import { resolveDiscount } from "./discount.controller.js";
+import { emailTicketToGuest } from "./webhook.controller.js";
 
 /* Early-bird: a tier can carry a cheaper price until a cutoff */
 export function effectivePrice(tier, at = new Date()) {
@@ -240,6 +241,9 @@ export const initiatePayment = async (req, res) => {
         admittedCount: 0,
       });
 
+      // 📧 ticket lands in their inbox automatically (fire-and-forget)
+      emailTicketToGuest(reference);
+
       return res.json({
         reference,
         paymentUrl: `${process.env.FRONTEND_URL}/success/${reference}`,
@@ -444,6 +448,10 @@ export const paymentCallback = async (req, res) => {
         creditAmbassadorCommission(payment),
       )
       .catch(() => {});
+
+    // 📧 ticket email — only this path created the ticket (the webhook
+    // skips creation when it already exists), so no duplicate sends
+    emailTicketToGuest(reference);
     return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
   } catch (err) {
     console.error("PAYMENT CALLBACK ERROR:", err);

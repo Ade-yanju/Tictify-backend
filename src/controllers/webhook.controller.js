@@ -85,7 +85,7 @@ async function handleTransferEvent(payload, res) {
 }
 
 /* ── Post-payment ticket email (non-blocking) ── */
-async function emailTicketToGuest(reference) {
+export async function emailTicketToGuest(reference) {
   try {
     const ticket = await Ticket.findOne({ paymentRef: reference }).populate("event");
     if (!ticket || !ticket.buyerEmail) return;

@@ -3,7 +3,7 @@ import { authenticate } from "../middlewares/auth.middleware.js";
 import { adminOnly } from "../middlewares/admin.middleware.js";
 
 import { adminDashboard } from "../controllers/admin.dashboard.controller.js";
-import { adminAnalytics } from "../controllers/admin.analytics.controller.js";
+import { adminAnalytics, adminFinance } from "../controllers/admin.analytics.controller.js";
 import {
   getAdminOrganizers,
   getAdminEvents,
@@ -17,6 +17,7 @@ router.get("/dashboard", authenticate, adminOnly, adminDashboard);
 
 /* ================= ANALYTICS ================= */
 router.get("/analytics", authenticate, adminOnly, adminAnalytics);
+router.get("/finance", authenticate, adminOnly, adminFinance);
 
 /* ================= ORGANIZERS ================= */
 router.get("/organizers", authenticate, adminOnly, getAdminOrganizers);
