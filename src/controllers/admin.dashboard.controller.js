@@ -1,49 +1,60 @@
 // controllers/admin.dashboard.controller.js
 import Event from "../models/Event.js";
-import Ticket from "../models/Ticket.js";
+import Payment from "../models/Payment.js";
 import Wallet from "../models/Wallet.js";
 import Withdrawal from "../models/Withdrawal.js";
 import User from "../models/User.js";
 
 export const adminDashboard = async (req, res) => {
   try {
-    const [events, tickets, wallets, withdrawals, organizers] =
-      await Promise.all([
-        Event.find(),
-        Ticket.find(),
-        Wallet.find(),
-        Withdrawal.find({ status: "PENDING" }),
-        User.find({ role: "organizer" }),
-      ]);
+    const [sales, liveEvents, endedEvents, scheduledEvents, organizers,
+           pendingWd, wallets] = await Promise.all([
+      /* Money truth lives on successful Payments — includes quantity
+         and the REAL platformFee charged at checkout */
+      Payment.aggregate([
+        { $match: { status: "SUCCESS" } },
+        {
+          $group: {
+            _id: null,
+            revenue: { $sum: "$amount" },            // everything guests paid
+            platformFees: { $sum: "$platformFee" },  // Tictify's actual cut
+            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+          },
+        },
+      ]),
+      Event.countDocuments({ status: "LIVE" }),
+      Event.countDocuments({ status: "ENDED" }),
+      Event.countDocuments({ status: "DRAFT" }),
+      User.countDocuments({ role: "organizer" }),
+      Withdrawal.aggregate([
+        { $match: { status: "PENDING" } },
+        { $group: { _id: null, amount: { $sum: "$amount" }, count: { $sum: 1 } } },
+      ]),
+      Wallet.find().sort("-totalEarnings").limit(5),
+    ]);
 
-    /* ================= TOTAL REVENUE ================= */
-    const totalRevenue = tickets.reduce(
-      (sum, t) => sum + (t.amountPaid || 0),
-      0,
-    );
-
-    /* ================= PLATFORM FEES (FIXED) ================= */
-    const platformFees = tickets.reduce(
-      (sum, t) => sum + Math.round((t.amountPaid || 0) * 0.03 + 80),
-      0,
-    );
-
-    /* ================= TOP ORGANIZERS ================= */
-    const topOrganizers = wallets
-      .sort((a, b) => b.totalEarnings - a.totalEarnings)
-      .slice(0, 5);
+    const s = sales[0] || {};
 
     res.json({
       stats: {
-        totalRevenue,
-        platformFees, // ✅ NOW CORRECT
-        totalTicketsSold: tickets.length,
-        totalEvents: events.length,
-        totalOrganizers: organizers.length,
-        pendingWithdrawals: withdrawals.length,
+        /* keys the dashboard UI reads */
+        revenue: s.revenue || 0,
+        platformFees: s.platformFees || 0,
+        ticketsSold: s.ticketsSold || 0,
+        events: liveEvents,
+        organizers,
+        pendingAmount: pendingWd[0]?.amount || 0,
+        liveEvents,
+        endedEvents,
+        scheduledEvents,
+        /* legacy keys kept for any other consumers */
+        totalRevenue: s.revenue || 0,
+        totalTicketsSold: s.ticketsSold || 0,
+        totalEvents: liveEvents + endedEvents + scheduledEvents,
+        totalOrganizers: organizers,
+        pendingWithdrawals: pendingWd[0]?.count || 0,
       },
-      topOrganizers,
-      pendingWithdrawals: withdrawals,
+      topOrganizers: wallets,
     });
   } catch (err) {
     console.error("ADMIN DASHBOARD ERROR:", err);

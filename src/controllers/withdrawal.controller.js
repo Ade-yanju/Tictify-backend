@@ -123,7 +123,7 @@ export const requestWithdrawal = async (req, res) => {
           <h2 style="color:#1a1a1a;margin-top:0;">Confirm your withdrawal</h2>
           <p style="color:#555;line-height:1.7;">You (or someone using your account) requested a payout:</p>
           <div style="background:#fff;padding:18px 22px;border-radius:12px;border-left:4px solid #E8C96A;margin:16px 0;">
-            <p style="margin:4px 0;"><strong>You receive:</strong> ₦${netAmount.toLocaleString()} <span style="color:#888;">(₦${fee} transfer fee)</span></p>
+            <p style="margin:4px 0;"><strong>You receive:</strong> ₦${netAmount.toLocaleString()} <span style="color:#888;">(₦50 stamp duty + ₦50 platform fee)</span></p>
             <p style="margin:4px 0;"><strong>To:</strong> ${bankName} ····${accountNumber.slice(-4)} (${accountName})</p>
           </div>
           ${usedBefore ? "" : `<p style="color:#B00020;font-weight:bold;">⚠️ This bank account has never been used on your Tictify account before.</p>`}

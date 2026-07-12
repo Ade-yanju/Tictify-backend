@@ -16,13 +16,14 @@ export const paystackConfigured = Boolean(
   PAYSTACK_SECRET_KEY && PAYSTACK_SECRET_KEY.startsWith("sk_"),
 );
 
-/* Paystack NGN transfer fees — charged to the ORGANIZER so payouts
-   never cost the platform:
-   ≤ ₦5,000 → ₦10 · ₦5,001–₦50,000 → ₦25 · > ₦50,000 → ₦50 */
-export function transferFee(amount) {
-  if (amount <= 5000) return 10;
-  if (amount <= 50000) return 25;
-  return 50;
+/* Withdrawal fee — flat ₦100 charged to the withdrawer:
+   ₦50 stamp duty + ₦50 platform/maintenance fee.
+   (Covers Paystack's ₦10-₦50 transfer cost; the rest is margin.)
+   Example: withdraw ₦25,000 → bank receives ₦24,900, wallet → ₦0. */
+export const STAMP_DUTY = 50;
+export const PLATFORM_WITHDRAWAL_FEE = 50;
+export function transferFee() {
+  return STAMP_DUTY + PLATFORM_WITHDRAWAL_FEE; // ₦100 flat
 }
 
 /* Create (or reuse) a transfer recipient, then fire the transfer.

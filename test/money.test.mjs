@@ -22,12 +22,12 @@ test("computeFees: processing fee caps at ₦2,000", () => {
   assert.equal(f.processingFee, 2000);
 });
 
-test("transferFee tiers: 10 / 25 / 50", () => {
-  assert.equal(transferFee(500), 10);
-  assert.equal(transferFee(5000), 10);
-  assert.equal(transferFee(5001), 25);
-  assert.equal(transferFee(50000), 25);
-  assert.equal(transferFee(50001), 50);
+test("withdrawal fee: flat ₦100 (₦50 stamp duty + ₦50 platform)", () => {
+  assert.equal(transferFee(500), 100);
+  assert.equal(transferFee(25000), 100);
+  assert.equal(transferFee(5000000), 100);
+  // the user's own example: withdraw 25,000 → bank gets 24,900
+  assert.equal(25000 - transferFee(25000), 24900);
 });
 
 test("order fees: 3 × ₦5,000 in one order is cheaper than 3 separate orders", () => {
