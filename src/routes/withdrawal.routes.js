@@ -2,6 +2,7 @@ import express from "express";
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 import {
   requestWithdrawal,
+  confirmWithdrawal,
   getAllWithdrawals, // Added this back so you can still view history
 } from "../controllers/withdrawal.controller.js";
 
@@ -14,6 +15,14 @@ router.post(
   authenticate,
   authorize("organizer", "ambassador", "affiliate"), // partners & affiliates withdraw too
   requestWithdrawal,
+);
+
+/* Step 2: enter the emailed 6-digit code — only then does money move */
+router.post(
+  "/:withdrawalId/confirm",
+  authenticate,
+  authorize("organizer", "ambassador", "affiliate"),
+  confirmWithdrawal,
 );
 
 /* ===== ADMIN ===== */
