@@ -22,6 +22,7 @@ import ambassadorRoutes from "./routes/ambassador.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import discountRoutes from "./routes/discount.routes.js";
 import affiliateRoutes from "./routes/affiliate.routes.js";
+import { processPendingPayouts } from "./services/payoutQueue.service.js";
 
 const app = express();
 
@@ -62,7 +63,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "org-dashboard-v3" }),
+  res.json({ ok: true, version: "auto-payout-v1" }),
 );
 
 /* ================= ROUTES ================= */
@@ -94,3 +95,18 @@ console.log("MongoDB connected");
 app.listen(PORT, "0.0.0.0", () => {
   console.log(`Server running on port ${PORT}`);
 });
+
+/* Self-driving payouts: withdrawals whose instant transfer couldn't
+   fire (T+1 settlement gap, transient Paystack errors) are paid
+   automatically as soon as the settled balance covers them — no admin
+   needed. Runs in-process to stay on Render's free tier; the GitHub
+   Actions keepalive stops the dyno from sleeping between ticks. */
+const PAYOUT_SWEEP_MS = 10 * 60 * 1000;
+setInterval(
+  () => processPendingPayouts().catch((e) => console.error("SWEEP:", e)),
+  PAYOUT_SWEEP_MS,
+);
+setTimeout(
+  () => processPendingPayouts().catch((e) => console.error("SWEEP:", e)),
+  20 * 1000, // catch-up pass shortly after every deploy/restart
+);

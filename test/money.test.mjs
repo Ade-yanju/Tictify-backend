@@ -35,3 +35,11 @@ test("order fees: 3 × ₦5,000 in one order is cheaper than 3 separate orders",
   const threeOrders = 3 * (computeFees(5000).total - 5000);
   assert.ok(oneOrder < threeOrders);
 });
+
+test("Paystack transfer charge bands — sweep must budget these correctly", async () => {
+  const { paystackTransferCharge } = await import("../src/services/paystack.service.js");
+  assert.equal(paystackTransferCharge(5000), 10);   // ≤ ₦5,000
+  assert.equal(paystackTransferCharge(24900), 25);  // ₦5,001–₦50,000
+  assert.equal(paystackTransferCharge(50000), 25);
+  assert.equal(paystackTransferCharge(50001), 50);  // > ₦50,000
+});

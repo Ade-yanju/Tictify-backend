@@ -253,9 +253,18 @@ export const confirmWithdrawal = async (req, res) => {
           status: "PAID",
         });
       } catch (paystackErr) {
-        // payout couldn't start — funds stay safely held for admin review
+        /* Payout couldn't start (usually the T+1 settlement gap) —
+           funds stay held and the payout queue retries automatically
+           every few minutes until the balance covers it. */
         console.error("AUTO PAYOUT FAILED:", paystackErr.message);
+        withdrawal.failureReason = paystackErr.message;
+        await withdrawal.save();
       }
+
+      return res.json({
+        message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} will be sent to your bank automatically — usually within 24 hours. Nothing else for you to do.`,
+        status: "PENDING",
+      });
     }
 
     return res.json({

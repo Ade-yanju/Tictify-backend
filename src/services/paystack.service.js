@@ -26,6 +26,31 @@ export function transferFee() {
   return STAMP_DUTY + PLATFORM_WITHDRAWAL_FEE; // ₦100 flat
 }
 
+/* What Paystack charges US to send a transfer (their published NGN bands).
+   Needed to know if the Paystack Balance can really cover a payout. */
+export function paystackTransferCharge(amount) {
+  if (amount <= 5000) return 10;
+  if (amount <= 50000) return 25;
+  return 50;
+}
+
+/* Available (settled) NGN balance in naira, or null if the check failed.
+   Transfers can only spend this — money still settling doesn't count. */
+export async function getAvailableBalance() {
+  if (!paystackConfigured) return null;
+  try {
+    const res = await fetch("https://api.paystack.co/balance", {
+      headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
+    });
+    const body = await res.json();
+    if (!body.status) return null;
+    const ngn = (body.data || []).find((b) => b.currency === "NGN");
+    return ngn ? ngn.balance / 100 : null;
+  } catch {
+    return null;
+  }
+}
+
 /* Create (or reuse) a transfer recipient, then fire the transfer.
    Returns { reference, transferCode, status } or throws with a
    human-readable message. */
