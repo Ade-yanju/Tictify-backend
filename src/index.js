@@ -63,7 +63,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "auto-payout-v1" }),
+  res.json({ ok: true, version: "affiliate-code-v2" }),
 );
 
 /* ================= ROUTES ================= */

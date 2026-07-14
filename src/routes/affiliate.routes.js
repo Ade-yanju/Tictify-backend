@@ -120,6 +120,15 @@ router.get("/join/callback", async (req, res) => {
         affiliateCode,
         isActive: true,
       });
+    } else {
+      /* Existing account paid the join fee — grant the affiliate code
+         (and role, unless they're an admin/organizer who'd lose their
+         own dashboard). Previously this branch silently did nothing,
+         leaving paid affiliates with no promo code. */
+      if (!user.affiliateCode) user.affiliateCode = affiliateCode;
+      if (user.role !== "admin" && user.role !== "organizer")
+        user.role = "affiliate";
+      await user.save();
     }
     signup.affiliateCode = user.affiliateCode || affiliateCode;
     await signup.save();
@@ -151,10 +160,22 @@ router.get("/join/callback", async (req, res) => {
 /* Affiliate dashboard: code, balance, sales totals */
 router.get("/me", authenticate, authorize("affiliate"), async (req, res) => {
   try {
+    /* Self-heal: an affiliate without a promo code would show a blank
+       code AND platform-wide stats (promoter:null matches every
+       un-promoted sale). Mint their code on first load instead. */
+    let code = req.user.affiliateCode;
+    if (!code) {
+      const prefix =
+        String(req.user.name || "").replace(/[^a-zA-Z]/g, "").slice(0, 6).toUpperCase() ||
+        "AFF";
+      code = `${prefix}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+      await User.updateOne({ _id: req.user._id }, { affiliateCode: code });
+    }
+
     const [wallet, sales] = await Promise.all([
       Wallet.findOne({ organizer: req.user._id }),
       Payment.aggregate([
-        { $match: { promoter: req.user.affiliateCode, status: "SUCCESS" } },
+        { $match: { promoter: code, status: "SUCCESS" } },
         {
           $group: {
             _id: null,
@@ -166,7 +187,7 @@ router.get("/me", authenticate, authorize("affiliate"), async (req, res) => {
     ]);
     res.json({
       name: req.user.name,
-      affiliateCode: req.user.affiliateCode,
+      affiliateCode: code,
       balance: wallet?.balance || 0,
       totalEarned: wallet?.totalEarnings || 0,
       ticketsSold: sales[0]?.ticketsSold || 0,
