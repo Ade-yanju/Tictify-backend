@@ -8,6 +8,10 @@ import {
   getAdminOrganizers,
   getAdminEvents,
 } from "../controllers/admin.controller.js";
+import {
+  getAdminAffiliates,
+  toggleAdminAffiliate,
+} from "../controllers/admin.affiliates.controller.js";
 import { adminCancelEvent } from "../controllers/event.controller.js";
 
 const router = express.Router();
@@ -26,6 +30,10 @@ router.get("/organizers", authenticate, adminOnly, getAdminOrganizers);
 /* ================= EVENTS ================= */
 router.get("/events", authenticate, adminOnly, getAdminEvents);
 router.patch("/events/:id/cancel", authenticate, adminOnly, adminCancelEvent);
+
+/* ================= AFFILIATES ================= */
+router.get("/affiliates", authenticate, adminOnly, getAdminAffiliates);
+router.patch("/affiliates/:id/toggle", authenticate, adminOnly, toggleAdminAffiliate);
 
 /* NOTE: /withdrawals (list, approve, reject) lives in
    admin.withdrawal.routes.js — do not redefine it here.
