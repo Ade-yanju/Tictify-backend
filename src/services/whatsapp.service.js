@@ -176,6 +176,60 @@ export async function sendList(to, body, buttonText, rows = []) {
   return { ...fallback, fellBack: true };
 }
 
+/* =====================================================
+   MEDIA DOWNLOAD — fetch a photo the guest sent us.
+   Two-step per the Cloud API: GET /<mediaId> (Bearer) →
+   json.url → GET that url WITH the same Bearer header.
+   Never throws: returns a Buffer or null.
+===================================================== */
+export async function downloadWhatsAppMedia(mediaId) {
+  const { accessToken, ok } = readConfig();
+  if (!ok || !mediaId) return null;
+
+  const withTimeout = (p) =>
+    Promise.race([
+      p,
+      new Promise((_, reject) => {
+        const t = setTimeout(
+          () => reject(new Error(`media fetch timed out after ${SEND_TIMEOUT_MS}ms`)),
+          SEND_TIMEOUT_MS,
+        );
+        t.unref?.();
+      }),
+    ]);
+
+  try {
+    const metaRes = await withTimeout(
+      fetch(`${GRAPH_BASE}/${mediaId}`, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }),
+    );
+    const meta = await metaRes.json().catch(() => ({}));
+    if (!metaRes.ok || !meta?.url) {
+      console.error(
+        "❌ WHATSAPP MEDIA META FAILED:",
+        metaRes.status,
+        JSON.stringify(meta).slice(0, 200),
+      );
+      return null;
+    }
+
+    const fileRes = await withTimeout(
+      fetch(meta.url, {
+        headers: { Authorization: `Bearer ${accessToken}` },
+      }),
+    );
+    if (!fileRes.ok) {
+      console.error("❌ WHATSAPP MEDIA DOWNLOAD FAILED:", fileRes.status);
+      return null;
+    }
+    return Buffer.from(await fileRes.arrayBuffer());
+  } catch (err) {
+    console.error("❌ WHATSAPP MEDIA ERROR:", err.message);
+    return null;
+  }
+}
+
 /* ── Post-payment QR delivery (WhatsApp twin of emailTicketToGuest).
    Called fire-and-forget wherever a ticket is minted. Never throws. ── */
 export async function deliverTicketToWhatsApp({ phone, eventTitle, reference }) {

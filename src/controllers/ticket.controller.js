@@ -347,99 +347,158 @@ export const getTicketByReference = async (req, res) => {
    Accepts any of:
    - the QR payload (hex code, or legacy "TICKET:<ref>:<email>")
    - a manually typed payment reference (any case)
+
+   performScan is the shared core — used by the HTTP route
+   AND the WhatsApp gate scanner. Every guard lives here:
+   ownership, cancelled events, the atomic group admit.
+   Returns structured data; never sends a response itself.
 ===================================================== */
+export async function performScan({ code, eventId, actingUser }) {
+  if (!code || typeof code !== "string") {
+    return {
+      admitted: false,
+      status: 400,
+      reason: "INVALID",
+      message: "Ticket code is required",
+    };
+  }
+
+  /* ── Normalize the scanned/typed code ── */
+  const raw = code.trim();
+  const or = [];
+  if (raw.toUpperCase().startsWith("TICKET:")) {
+    // legacy QR payload: TICKET:<reference>:<email>
+    const ref = raw.split(":")[1]?.trim();
+    if (ref) or.push({ paymentRef: ref }, { paymentRef: ref.toUpperCase() });
+  } else {
+    // hex qr code, or a reference typed by hand
+    or.push(
+      { qrCode: raw },
+      { qrCode: raw.toLowerCase() },
+      { paymentRef: raw },
+      { paymentRef: raw.toUpperCase() },
+    );
+  }
+  if (or.length === 0) {
+    return {
+      admitted: false,
+      status: 404,
+      reason: "NOT_FOUND",
+      message: "Ticket not found",
+    };
+  }
+
+  /* ── Locate the ticket (case-insensitive for typed codes) ── */
+  const lookup = eventId ? { $or: or, event: eventId } : { $or: or };
+  const found = await Ticket.findOne(lookup)
+    .collation({ locale: "en", strength: 2 })
+    .populate("event");
+  if (!found) {
+    return {
+      admitted: false,
+      status: 404,
+      reason: "NOT_FOUND",
+      message: "Ticket not found",
+    };
+  }
+
+  /* ── Cancelled events admit nobody ── */
+  if (found.event?.status === "CANCELLED") {
+    return {
+      admitted: false,
+      status: 410,
+      reason: "CANCELLED",
+      message: "This event was cancelled — ticket is not valid for entry",
+    };
+  }
+
+  /* ── Ownership: only this event's organizer may admit (admins pass) ── */
+  const eventOrganizer =
+    found.event?.organizer?.toString() || found.organizer?.toString();
+  const isAdmin = actingUser?.role === "admin";
+  if (
+    !eventOrganizer ||
+    (!isAdmin && eventOrganizer !== String(actingUser?._id || ""))
+  ) {
+    return {
+      admitted: false,
+      status: 403,
+      reason: "FORBIDDEN",
+      message: "You are not authorized to scan this ticket",
+    };
+  }
+
+  /* ── Atomic group admission (prevents double-admit races) ── */
+  const groupSize = Math.max(1, found.groupSize || 1);
+  const ticket = await Ticket.findOneAndUpdate(
+    {
+      _id: found._id,
+      scanned: { $ne: true }, // legacy fully-used tickets stay rejected
+      $expr: { $lt: [{ $ifNull: ["$admittedCount", 0] }, groupSize] },
+    },
+    {
+      $inc: { admittedCount: 1 },
+      $set: { scannedAt: new Date() },
+    },
+    { new: true },
+  );
+
+  // Final guest in the group → mark the ticket fully used
+  if (ticket && ticket.admittedCount >= groupSize && !ticket.scanned) {
+    ticket.scanned = true;
+    await ticket.save();
+  }
+
+  if (!ticket) {
+    return {
+      admitted: false,
+      status: 409,
+      reason: "USED",
+      groupSize,
+      message:
+        groupSize > 1
+          ? `Ticket fully used — all ${groupSize} guests already admitted`
+          : "Ticket already used",
+    };
+  }
+
+  return {
+    admitted: true,
+    status: 200,
+    reason: "ADMITTED",
+    message:
+      groupSize > 1
+        ? `Access granted — guest ${ticket.admittedCount} of ${groupSize}`
+        : "Access granted",
+    attendee: ticket.buyerEmail,
+    guestName: ticket.buyerEmail,
+    ticketType: ticket.ticketType,
+    admittedCount: ticket.admittedCount,
+    groupSize,
+    remaining: groupSize - ticket.admittedCount,
+  };
+}
+
+/* HTTP wrapper — responses are byte-identical to the pre-refactor route */
 export const scanTicketController = async (req, res) => {
   try {
-    const { code, eventId } = req.body;
-    if (!code || typeof code !== "string") {
-      return res.status(400).json({ message: "Ticket code is required" });
-    }
+    const result = await performScan({
+      code: req.body.code,
+      eventId: req.body.eventId,
+      actingUser: req.user,
+    });
 
-    /* ── Normalize the scanned/typed code ── */
-    const raw = code.trim();
-    const or = [];
-    if (raw.toUpperCase().startsWith("TICKET:")) {
-      // legacy QR payload: TICKET:<reference>:<email>
-      const ref = raw.split(":")[1]?.trim();
-      if (ref) or.push({ paymentRef: ref }, { paymentRef: ref.toUpperCase() });
-    } else {
-      // hex qr code, or a reference typed by hand
-      or.push(
-        { qrCode: raw },
-        { qrCode: raw.toLowerCase() },
-        { paymentRef: raw },
-        { paymentRef: raw.toUpperCase() },
-      );
-    }
-    if (or.length === 0) {
-      return res.status(404).json({ message: "Ticket not found" });
-    }
-
-    /* ── Locate the ticket (case-insensitive for typed codes) ── */
-    const lookup = eventId ? { $or: or, event: eventId } : { $or: or };
-    const found = await Ticket.findOne(lookup)
-      .collation({ locale: "en", strength: 2 })
-      .populate("event");
-    if (!found) {
-      return res.status(404).json({ message: "Ticket not found" });
-    }
-
-    /* ── Cancelled events admit nobody ── */
-    if (found.event?.status === "CANCELLED") {
-      return res.status(410).json({
-        message: "This event was cancelled — ticket is not valid for entry",
-      });
-    }
-
-    /* ── Ownership: only this event's organizer may admit ── */
-    const eventOrganizer =
-      found.event?.organizer?.toString() || found.organizer?.toString();
-    if (!eventOrganizer || eventOrganizer !== req.user._id.toString()) {
-      return res
-        .status(403)
-        .json({ message: "You are not authorized to scan this ticket" });
-    }
-
-    /* ── Atomic group admission (prevents double-admit races) ── */
-    const groupSize = Math.max(1, found.groupSize || 1);
-    const ticket = await Ticket.findOneAndUpdate(
-      {
-        _id: found._id,
-        scanned: { $ne: true }, // legacy fully-used tickets stay rejected
-        $expr: { $lt: [{ $ifNull: ["$admittedCount", 0] }, groupSize] },
-      },
-      {
-        $inc: { admittedCount: 1 },
-        $set: { scannedAt: new Date() },
-      },
-      { new: true },
-    );
-
-    // Final guest in the group → mark the ticket fully used
-    if (ticket && ticket.admittedCount >= groupSize && !ticket.scanned) {
-      ticket.scanned = true;
-      await ticket.save();
-    }
-
-    if (!ticket) {
-      return res.status(409).json({
-        message:
-          groupSize > 1
-            ? `Ticket fully used — all ${groupSize} guests already admitted`
-            : "Ticket already used",
-      });
+    if (!result.admitted) {
+      return res.status(result.status).json({ message: result.message });
     }
 
     return res.json({
-      message:
-        groupSize > 1
-          ? `Access granted — guest ${ticket.admittedCount} of ${groupSize}`
-          : "Access granted",
-      attendee: ticket.buyerEmail,
-      ticketType: ticket.ticketType,
-      admitted: ticket.admittedCount,
-      groupSize,
-      remaining: groupSize - ticket.admittedCount,
+      message: result.message,
+      attendee: result.attendee,
+      ticketType: result.ticketType,
+      admitted: result.admittedCount,
+      groupSize: result.groupSize,
+      remaining: result.remaining,
     });
   } catch (error) {
     console.error("SCAN ERROR:", error);

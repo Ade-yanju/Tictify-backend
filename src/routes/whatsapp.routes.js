@@ -72,22 +72,26 @@ router.post("/webhook", (req, res) => {
     const message = value?.messages?.[0];
     if (!message?.from) return;
 
-    let text = "";
+    /* Photos ride through as { type:"image", imageId } so the gate
+       scanner can download + decode them; everything else is text. */
+    let input = "";
     if (message.type === "text") {
-      text = message.text?.body || "";
+      input = message.text?.body || "";
     } else if (message.type === "interactive") {
       /* button/list replies: their id (or title) doubles as the input */
-      text =
+      input =
         message.interactive?.button_reply?.id ||
         message.interactive?.button_reply?.title ||
         message.interactive?.list_reply?.id ||
         message.interactive?.list_reply?.title ||
         "";
     } else if (message.type === "button") {
-      text = message.button?.payload || message.button?.text || "";
+      input = message.button?.payload || message.button?.text || "";
+    } else if (message.type === "image" && message.image?.id) {
+      input = { type: "image", imageId: message.image.id };
     }
 
-    handleIncoming(message.from, text, {
+    handleIncoming(message.from, input, {
       send: sendText,
       sendImage,
       sendButtons,

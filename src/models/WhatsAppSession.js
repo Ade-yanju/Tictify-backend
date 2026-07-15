@@ -34,6 +34,13 @@ const whatsAppSessionSchema = new mongoose.Schema(
       ref: "User",
     },
 
+    /* Affiliate link — separate from organizerUser so one phone can
+       be both an organizer and an affiliate at the same time. */
+    affiliateUser: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "User",
+    },
+
     /* Account-linking OTP — same sha256 discipline as withdrawals:
        6 digits, 10-minute expiry, 5 attempts. */
     otpHash: String,

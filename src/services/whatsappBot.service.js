@@ -10,12 +10,15 @@ import { sendEmail } from "./email.service.js";
 import {
   renderButtonsAsText,
   renderListAsText,
+  downloadWhatsAppMedia,
 } from "./whatsapp.service.js";
+import { decodeQrFromImage } from "./qrDecode.service.js";
 import {
   effectivePrice,
   createPaymentSession,
 } from "../controllers/payment.controller.js";
 import { resolveDiscount } from "../controllers/discount.controller.js";
+import { performScan } from "../controllers/ticket.controller.js";
 
 /* =====================================================
    WHATSAPP BOT — THE BRAIN
@@ -131,8 +134,9 @@ async function uiList(t, phone, body, buttonText, rows) {
 const MENU_ROWS = [
   { id: "1", title: "🔎 Browse events", description: "See what's on and buy right here" },
   { id: "2", title: "🎫 My tickets", description: "Resend your QR codes to this chat" },
-  { id: "3", title: "💼 Organizer zone", description: "Sales, balance & event creation" },
+  { id: "3", title: "💼 Organizer zone", description: "Sales, scanning & event creation" },
   { id: "4", title: "❓ Help", description: "What this bot can do" },
+  { id: "5", title: "🤝 Affiliate zone", description: "Your promo code, stats & share kit" },
 ];
 
 function menuBody(promoter) {
@@ -152,7 +156,18 @@ const ORG_MENU_ROWS = [
   { id: "2", title: "💸 Withdraw", description: "OTP-protected payout to your bank" },
   { id: "3", title: "🔓 Unlink this number", description: "Disconnect this WhatsApp" },
   { id: "4", title: "➕ Create event", description: "Set up a new event from chat" },
+  { id: "5", title: "🎫 Scan tickets", description: "Admit guests at the gate" },
 ];
+
+const AFF_MENU_ROWS = [
+  { id: "1", title: "📊 My stats", description: "Code, balance, earnings, sales" },
+  { id: "2", title: "📣 Share kit", description: "Ready-to-forward promo message" },
+  { id: "3", title: "🔓 Unlink", description: "Disconnect affiliate account" },
+];
+
+async function showAffMenu(t, phone, prefix = "") {
+  return uiList(t, phone, `${prefix}🤝 *Affiliate zone*`, "Options", AFF_MENU_ROWS);
+}
 
 async function showOrgMenu(t, phone, prefix = "") {
   return uiList(t, phone, `${prefix}💼 *Organizer zone*`, "Options", ORG_MENU_ROWS);
@@ -164,7 +179,8 @@ function helpText() {
     `Here's what I can do:\n` +
     `🔎 *Browse events* — see what's on and buy tickets without leaving this chat (card, payment link, or bank transfer)\n` +
     `🎫 *My tickets* — resend your QR codes to this chat\n` +
-    `💼 *Organizer zone* — check sales, balance, even create events on the go\n` +
+    `💼 *Organizer zone* — sales & balance, create events, and *scan guest tickets at the gate* (photo or typed code)\n` +
+    `🤝 *Affiliate zone* — your promo code, stats and a ready-to-forward share kit\n` +
     `🏷️ Got a discount or promo code? You can use both right here.\n\n` +
     `💳 Payments are handled securely by Paystack.\n` +
     `📧 Every ticket also lands in your email.\n\n` +
@@ -194,10 +210,14 @@ function clearOtpFields(session) {
 /* =====================================================
    ENTRY POINT — routes on session.state, never crashes
 ===================================================== */
-export async function handleIncoming(phone, text, transport) {
+export async function handleIncoming(phone, message, transport) {
   const t = transport || {};
   try {
-    const input = String(text || "").trim();
+    /* message is a plain string (typed/tapped input) OR
+       { type: "image", imageId } for photos (gate scanning) */
+    const isImage =
+      message != null && typeof message === "object" && message.type === "image";
+    const input = isImage ? "" : String(message ?? "").trim();
 
     let session = await WhatsAppSession.findOne({ phone });
     if (!session) {
@@ -213,7 +233,8 @@ export async function handleIncoming(phone, text, transport) {
     }
 
     /* Stale conversation (>24h): back to the main menu. The
-       organizerUser link is permanent — only state/data reset. */
+       organizerUser/affiliateUser links are permanent — only
+       state/data reset. */
     const stale =
       session.updatedAt &&
       Date.now() - new Date(session.updatedAt).getTime() > SESSION_STALE_MS;
@@ -222,6 +243,17 @@ export async function handleIncoming(phone, text, transport) {
       await setSession(session, "MENU", {});
       await t.send(phone, "👋 Welcome back!");
       return showMainMenu(t, phone, session);
+    }
+
+    /* 📷 Photos only mean something at the gate scanner */
+    if (isImage) {
+      if (session.state === "SCAN" && session.organizerUser) {
+        return await handleScanImage(session, message.imageId, t, phone);
+      }
+      return t.send(
+        phone,
+        `📷 Nice photo! If you're scanning guest tickets, open *Organizer zone* → *Scan tickets* first.\n\nType *menu* to get started.`,
+      );
     }
 
     /* Global escape hatches work from ANY state */
@@ -234,9 +266,18 @@ export async function handleIncoming(phone, text, transport) {
 
     /* organizer-only states need a live link */
     if (
-      (session.state === "ORG_MENU" || session.state.startsWith("EV_")) &&
+      (session.state === "ORG_MENU" ||
+        session.state === "SCAN_PICK" ||
+        session.state === "SCAN" ||
+        session.state.startsWith("EV_")) &&
       !session.organizerUser
     ) {
+      await setSession(session, "MENU", {});
+      return showMainMenu(t, phone, session);
+    }
+
+    /* affiliate-only state needs a live link */
+    if (session.state === "AFF_MENU" && !session.affiliateUser) {
       await setSession(session, "MENU", {});
       return showMainMenu(t, phone, session);
     }
@@ -264,6 +305,16 @@ export async function handleIncoming(phone, text, transport) {
         return await handleOrgOtp(session, input, t, phone);
       case "ORG_MENU":
         return await handleOrgMenu(session, input, t, phone);
+      case "AFF_EMAIL":
+        return await handleAffEmail(session, input, t, phone);
+      case "AFF_OTP":
+        return await handleAffOtp(session, input, t, phone);
+      case "AFF_MENU":
+        return await handleAffMenu(session, input, t, phone);
+      case "SCAN_PICK":
+        return await handleScanPick(session, input, t, phone);
+      case "SCAN":
+        return await handleScan(session, input, t, phone);
       case "EV_TITLE":
         return await handleEvTitle(session, input, t, phone);
       case "EV_DATE":
@@ -350,6 +401,17 @@ async function handleMenu(session, input, t, phone) {
     case "4":
       await setSession(session, "MENU", {});
       return t.send(phone, helpText());
+
+    case "5":
+      if (session.affiliateUser) {
+        await setSession(session, "AFF_MENU", {});
+        return showAffMenu(t, phone);
+      }
+      await setSession(session, "AFF_EMAIL", {});
+      return t.send(
+        phone,
+        `🤝 *Affiliate zone*\n\nWhat's your Tictify affiliate account email? We'll send a *6-digit code* there to verify it's really you.`,
+      );
 
     default:
       /* unknown input → main menu (spec: any unrecognised text) */
@@ -857,8 +919,348 @@ async function handleOrgMenu(session, input, t, phone) {
         `📝 *New event*\n\nWhat's the event *title*?\n\n(Type *menu* anytime to cancel.)`,
       );
 
+    case "5": {
+      /* Gate scanner: pick one of THEIR events first */
+      const events = await Event.find({
+        organizer: session.organizerUser,
+        status: "LIVE",
+        endDate: { $gt: new Date() }, // upcoming + happening right now
+      })
+        .sort("date")
+        .limit(10)
+        .lean();
+
+      if (!events.length) {
+        return showOrgMenu(
+          t,
+          phone,
+          `😔 You have no live events to scan for right now.\n\n`,
+        );
+      }
+
+      await setSession(session, "SCAN_PICK", {
+        scanEventIds: events.map((e) => String(e._id)),
+      });
+      return uiList(
+        t,
+        phone,
+        `🎫 *Scan tickets*\n\nWhich event are you scanning for?`,
+        "Events",
+        events.map((e, i) => ({
+          id: String(i + 1),
+          title: e.title,
+          description: fmtDate(e.date),
+        })),
+      );
+    }
+
     default:
       return showOrgMenu(t, phone);
+  }
+}
+
+/* ================= GATE SCANNER ================= */
+async function handleScanPick(session, input, t, phone) {
+  const ids = Array.isArray(session.data?.scanEventIds)
+    ? session.data.scanEventIds
+    : [];
+  const idx = parseInt(input, 10);
+  if (!Number.isInteger(idx) || idx < 1 || idx > ids.length) {
+    return t.send(
+      phone,
+      `Please reply with an event number from the list (1-${ids.length || 1}), or type *menu*.`,
+    );
+  }
+
+  /* Ownership re-checked here — scans stay scoped to THIS event */
+  const event = await Event.findOne({
+    _id: ids[idx - 1],
+    organizer: session.organizerUser,
+  }).lean();
+  if (!event) {
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `😕 That event is no longer available.\n\n`);
+  }
+
+  await setSession(session, "SCAN", {
+    scanEventId: String(event._id),
+    scanEventTitle: event.title,
+    scanCount: 0,
+  });
+  return t.send(
+    phone,
+    `🎫 *Scanner armed — ${event.title}*\n\n` +
+      `📷 Send a *photo* of the guest's QR code, or *type* the code/reference printed under it.\n\n` +
+      `Type *done* when you finish.`,
+  );
+}
+
+async function runScanAttempt(session, code, t, phone) {
+  const result = await performScan({
+    code,
+    eventId: session.data?.scanEventId, // always scoped to the picked event
+    actingUser: { _id: session.organizerUser, role: "organizer" },
+  });
+
+  if (!result.admitted) {
+    return t.send(phone, `❌ *DENIED* — ${result.message}`);
+  }
+
+  const count = (session.data?.scanCount || 0) + 1;
+  await setSession(session, "SCAN", { ...session.data, scanCount: count });
+
+  const groupLine =
+    result.groupSize > 1
+      ? `\n👥 Admits ${result.groupSize}: ${result.admittedCount} of ${result.groupSize} used`
+      : "";
+  return t.send(
+    phone,
+    `✅ *ADMITTED*${result.groupSize > 1 ? ` — guest ${result.admittedCount} of ${result.groupSize}` : ""}\n` +
+      `👤 ${result.guestName}\n` +
+      `🎟️ ${result.ticketType || "—"}${groupLine}\n\n` +
+      `📊 Session: ${count} admitted`,
+  );
+}
+
+async function handleScan(session, input, t, phone) {
+  const lower = input.toLowerCase();
+  if (["done", "stop", "exit", "finish"].includes(lower)) {
+    const n = session.data?.scanCount || 0;
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(
+      t,
+      phone,
+      `🏁 Scanner closed — ${n} guest${n === 1 ? "" : "s"} admitted this session.\n\n`,
+    );
+  }
+  /* anything else typed in SCAN mode is a scan attempt */
+  return runScanAttempt(session, input, t, phone);
+}
+
+async function handleScanImage(session, imageId, t, phone) {
+  /* injectable for tests; real transport uses the Cloud API + jimp/jsqr */
+  const download = t.downloadMedia || downloadWhatsAppMedia;
+  const decode = t.decodeQr || decodeQrFromImage;
+
+  const buffer = await download(imageId);
+  if (!buffer || !buffer.length) {
+    return t.send(
+      phone,
+      `😕 I couldn't download that photo — please send it again, or type the code printed under the QR.`,
+    );
+  }
+
+  const code = await decode(buffer);
+  if (!code) {
+    return t.send(
+      phone,
+      `😕 Couldn't read a QR in that photo — try a closer, well-lit shot, or type the code printed under the QR.`,
+    );
+  }
+
+  return runScanAttempt(session, code, t, phone);
+}
+
+/* ================= AFFILIATE: LINK ACCOUNT (EMAIL) ================= */
+async function handleAffEmail(session, input, t, phone) {
+  const email = input.toLowerCase();
+  if (!EMAIL_RE.test(email)) {
+    return t.send(
+      phone,
+      `That doesn't look like an email. Try again, or type *menu* to cancel.`,
+    );
+  }
+
+  /* affiliates by role — or ANY account that owns a promo code */
+  const user = await User.findOne({
+    email,
+    $or: [
+      { role: "affiliate" },
+      { affiliateCode: { $exists: true, $nin: [null, ""] } },
+    ],
+  });
+
+  if (user) {
+    const otp = String(crypto.randomInt(100000, 1000000));
+    session.otpHash = sha256(otp);
+    session.otpExpires = new Date(Date.now() + OTP_TTL_MS);
+    session.otpAttempts = 0;
+    await setSession(session, "AFF_OTP", { linkUserId: String(user._id) });
+
+    sendEmail({
+      to: user.email,
+      subject: `Your Tictify WhatsApp code: ${otp}`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;background:#f9fafb;border-radius:16px;">
+          <h2 style="color:#1a1a1a;margin-top:0;">Link WhatsApp to your affiliate account</h2>
+          <p style="color:#555;line-height:1.7;">Someone (hopefully you) asked to connect a WhatsApp number ending in
+          <strong>····${String(phone).slice(-4)}</strong> to your Tictify affiliate account.</p>
+          <div style="text-align:center;background:#fff;padding:18px;border-radius:12px;margin:16px 0;">
+            <p style="margin:0 0 6px;color:#888;font-size:12px;">YOUR CODE (expires in 10 minutes)</p>
+            <p style="margin:0;font-size:32px;font-weight:800;letter-spacing:8px;color:#1a1a1a;">${otp}</p>
+          </div>
+          <p style="color:#B00020;font-size:13px;line-height:1.7;"><strong>Didn't request this?</strong> Ignore this email —
+          nothing happens without the code. If you're worried, change your password and contact tictify@gmail.com.</p>
+        </div>
+      `,
+    }).catch((e) => console.error("WA affiliate OTP email failed:", e.message));
+  } else {
+    /* No enumeration: unknown emails walk the exact same path with an
+       unmatchable code — wrong-code replies are indistinguishable. */
+    session.otpHash = sha256(crypto.randomBytes(16).toString("hex"));
+    session.otpExpires = new Date(Date.now() + OTP_TTL_MS);
+    session.otpAttempts = 0;
+    await setSession(session, "AFF_OTP", {});
+  }
+
+  return t.send(
+    phone,
+    `🔐 If an affiliate account exists for that email, we've sent it a *6-digit code*.\n\nReply with the code here to link this number. (It expires in 10 minutes.)`,
+  );
+}
+
+/* ================= AFFILIATE: LINK ACCOUNT (OTP) ================= */
+async function handleAffOtp(session, input, t, phone) {
+  if (!/^\d{6}$/.test(input)) {
+    return t.send(
+      phone,
+      `Please send the *6-digit code* from your email, or type *menu* to cancel.`,
+    );
+  }
+
+  if (!session.otpHash || !session.otpExpires || session.otpExpires < new Date()) {
+    clearOtpFields(session);
+    await setSession(session, "MENU", {});
+    return t.send(
+      phone,
+      `⌛ That code has expired. Type *5* from the *menu* to start again.`,
+    );
+  }
+
+  if (sha256(input) !== session.otpHash || !session.data?.linkUserId) {
+    session.otpAttempts = (session.otpAttempts || 0) + 1;
+    const left = OTP_MAX_ATTEMPTS - session.otpAttempts;
+    if (left <= 0) {
+      clearOtpFields(session);
+      await setSession(session, "MENU", {});
+      return t.send(
+        phone,
+        `❌ Too many wrong attempts. Type *5* from the *menu* to start again.`,
+      );
+    }
+    await session.save();
+    return t.send(
+      phone,
+      `❌ Wrong code — ${left} attempt${left === 1 ? "" : "s"} left.`,
+    );
+  }
+
+  /* Correct code → permanent link (separate from any organizer link) */
+  session.affiliateUser = new mongoose.Types.ObjectId(session.data.linkUserId);
+  clearOtpFields(session);
+  await setSession(session, "AFF_MENU", {});
+  return showAffMenu(
+    t,
+    phone,
+    `✅ *Account linked!* This WhatsApp number is now connected to your affiliate account.\n\n`,
+  );
+}
+
+/* Self-heal: an affiliate without a promo code gets one minted —
+   EXACTLY like GET /api/affiliates/me — so bot and web agree. */
+async function ensureAffiliateCode(userId) {
+  const user = await User.findById(userId);
+  if (!user) return { user: null, code: null };
+  let code = user.affiliateCode;
+  if (!code) {
+    const prefix =
+      String(user.name || "").replace(/[^a-zA-Z]/g, "").slice(0, 6).toUpperCase() ||
+      "AFF";
+    code = `${prefix}-${crypto.randomBytes(2).toString("hex").toUpperCase()}`;
+    await User.updateOne({ _id: user._id }, { affiliateCode: code });
+  }
+  return { user, code };
+}
+
+/* ================= AFFILIATE: SUBMENU ================= */
+async function handleAffMenu(session, input, t, phone) {
+  switch (input) {
+    case "1": {
+      const affId = new mongoose.Types.ObjectId(String(session.affiliateUser));
+      const { user, code } = await ensureAffiliateCode(affId);
+      if (!user) {
+        session.affiliateUser = undefined;
+        await setSession(session, "MENU", {});
+        return showMainMenu(t, phone, session);
+      }
+
+      /* Same aggregations as GET /api/affiliates/me — numbers must
+         match the web dashboard exactly. */
+      const [wallet, sales] = await Promise.all([
+        Wallet.findOne({ organizer: affId }).lean(),
+        Payment.aggregate([
+          { $match: { promoter: code, status: "SUCCESS" } },
+          {
+            $group: {
+              _id: null,
+              ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+              salesVolume: { $sum: "$organizerAmount" },
+            },
+          },
+        ]),
+      ]);
+
+      return showAffMenu(
+        t,
+        phone,
+        `📊 *Your affiliate stats*\n\n` +
+          `🏷️ Promo code: *${code}*\n` +
+          `💰 Balance: ${fmtNaira(wallet?.balance || 0)}\n` +
+          `📈 Total earned: ${fmtNaira(wallet?.totalEarnings || 0)}\n` +
+          `🎫 Tickets sold: ${sales[0]?.ticketsSold || 0}\n` +
+          `🧾 Sales volume: ${fmtNaira(sales[0]?.salesVolume || 0)}\n\n`,
+      );
+    }
+
+    case "2": {
+      const { user, code } = await ensureAffiliateCode(session.affiliateUser);
+      if (!user) {
+        session.affiliateUser = undefined;
+        await setSession(session, "MENU", {});
+        return showMainMenu(t, phone, session);
+      }
+
+      const botDigits = String(process.env.WHATSAPP_BOT_NUMBER || "")
+        .replace(/^\+/, "")
+        .replace(/[\s-]/g, "");
+      const waLink = /^\d{8,15}$/.test(botDigits)
+        ? `https://wa.me/${botDigits}?text=${encodeURIComponent(`Hi! I want tickets ref ${code}`)}`
+        : null;
+
+      return t.send(
+        phone,
+        `📣 *Your share kit* — forward this to your people 👇\n\n` +
+          `━━━━━━━━━━━━\n` +
+          `🎟️ *Tickets to the hottest events — right on WhatsApp!*\n` +
+          `Browse, pay by card or bank transfer, and your QR ticket lands in the chat.\n\n` +
+          (waLink
+            ? `Tap to start:\n${waLink}\n\n(or just send *ref ${code}* as your first message)\n`
+            : `Message the Tictify WhatsApp bot and start with:\n*ref ${code}*\n`) +
+          `━━━━━━━━━━━━\n\n` +
+          `💡 Your web links work too — every event link you copy on your dashboard carries *${code}* automatically.`,
+      );
+    }
+
+    case "3":
+      session.affiliateUser = undefined;
+      await setSession(session, "MENU", {});
+      return t.send(
+        phone,
+        `🔓 Done — this WhatsApp number is no longer linked to your affiliate account.\n\nType *menu* anytime.`,
+      );
+
+    default:
+      return showAffMenu(t, phone);
   }
 }
 
