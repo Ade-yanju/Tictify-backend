@@ -101,6 +101,81 @@ export async function sendImage(to, imageUrl, caption) {
   });
 }
 
+/* =====================================================
+   INTERACTIVE MESSAGES (tappable buttons / lists)
+   Every id doubles as the typed input the bot's state
+   machine expects, so taps and typed replies are
+   interchangeable. On ANY failure (API error, feature
+   unavailable) they FALL BACK to the equivalent
+   numbered-text message — the bot never goes silent.
+===================================================== */
+
+export function renderButtonsAsText(body, buttons = []) {
+  const lines = buttons.map((b) => `*${b.id}.* ${b.title}`);
+  return `${body}\n\n${lines.join("\n")}\n\nReply with one of the options above.`;
+}
+
+export function renderListAsText(body, rows = []) {
+  const lines = rows.map(
+    (r) => `*${r.id}.* ${r.title}${r.description ? `\n   ${r.description}` : ""}`,
+  );
+  return `${body}\n\n${lines.join("\n\n")}\n\nReply with one of the options above.`;
+}
+
+/* Up to 3 reply buttons, titles hard-capped at 20 chars (API limit) */
+export async function sendButtons(to, body, buttons = []) {
+  const result = await postMessage({
+    messaging_product: "whatsapp",
+    to: String(to),
+    type: "interactive",
+    interactive: {
+      type: "button",
+      body: { text: String(body).slice(0, 1024) },
+      action: {
+        buttons: buttons.slice(0, 3).map((b) => ({
+          type: "reply",
+          reply: { id: String(b.id), title: String(b.title).slice(0, 20) },
+        })),
+      },
+    },
+  });
+  if (result.success) return result;
+
+  const fallback = await sendText(to, renderButtonsAsText(body, buttons));
+  return { ...fallback, fellBack: true };
+}
+
+/* One-section list, up to 10 rows: title ≤24, description ≤72 (API limits) */
+export async function sendList(to, body, buttonText, rows = []) {
+  const result = await postMessage({
+    messaging_product: "whatsapp",
+    to: String(to),
+    type: "interactive",
+    interactive: {
+      type: "list",
+      body: { text: String(body).slice(0, 4096) },
+      action: {
+        button: String(buttonText || "Choose").slice(0, 20),
+        sections: [
+          {
+            rows: rows.slice(0, 10).map((r) => ({
+              id: String(r.id),
+              title: String(r.title).slice(0, 24),
+              ...(r.description
+                ? { description: String(r.description).slice(0, 72) }
+                : {}),
+            })),
+          },
+        ],
+      },
+    },
+  });
+  if (result.success) return result;
+
+  const fallback = await sendText(to, renderListAsText(body, rows));
+  return { ...fallback, fellBack: true };
+}
+
 /* ── Post-payment QR delivery (WhatsApp twin of emailTicketToGuest).
    Called fire-and-forget wherever a ticket is minted. Never throws. ── */
 export async function deliverTicketToWhatsApp({ phone, eventTitle, reference }) {

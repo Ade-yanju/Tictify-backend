@@ -1,6 +1,11 @@
 import express from "express";
 import crypto from "crypto";
-import { sendText, sendImage } from "../services/whatsapp.service.js";
+import {
+  sendText,
+  sendImage,
+  sendButtons,
+  sendList,
+} from "../services/whatsapp.service.js";
 import { handleIncoming } from "../services/whatsappBot.service.js";
 
 const router = express.Router();
@@ -82,9 +87,12 @@ router.post("/webhook", (req, res) => {
       text = message.button?.payload || message.button?.text || "";
     }
 
-    handleIncoming(message.from, text, { send: sendText, sendImage }).catch(
-      (err) => console.error("WHATSAPP BOT DISPATCH ERROR:", err),
-    );
+    handleIncoming(message.from, text, {
+      send: sendText,
+      sendImage,
+      sendButtons,
+      sendList,
+    }).catch((err) => console.error("WHATSAPP BOT DISPATCH ERROR:", err));
   } catch (err) {
     console.error("WHATSAPP WEBHOOK ERROR:", err);
   }

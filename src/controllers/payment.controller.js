@@ -131,6 +131,10 @@ export async function createPaymentSession({
   promoter: rawPromoter,
   discountCode: rawDiscountCode,
   waPhone: rawWaPhone,
+  /* "link" (default, Paystack checkout URL — the web always uses this)
+     or "transfer" (dedicated bank account via the Charge API, used by
+     the WhatsApp bot so guests can pay without leaving the chat) */
+  payMethod = "link",
 }) {
   try {
     const promoter = sanitizePromoter(rawPromoter);
@@ -212,6 +216,7 @@ export async function createPaymentSession({
     /* Discount code: validate + atomically consume one use */
     let discountAmount = 0;
     let discountCode;
+    let claimedDiscountId; // so a failed transfer attempt can return the use
     if (rawDiscountCode) {
       const d = await resolveDiscount(event._id, rawDiscountCode);
       if (!d) {
@@ -231,6 +236,7 @@ export async function createPaymentSession({
         return { ok: false, status: 400, message: "Discount code just sold out" };
       }
       discountCode = claimed.code;
+      claimedDiscountId = claimed._id;
       discountAmount = Math.round((ticketPrice * qty * claimed.percentOff) / 100);
     }
 
@@ -326,6 +332,91 @@ export async function createPaymentSession({
       status: "PENDING",
       provider: "PAYSTACK",
     });
+
+    /* ── PAY BY BANK TRANSFER (Charge API — dedicated account) ──
+       Confirmation needs no new code: Paystack fires the same
+       charge.success webhook with this reference once the money
+       lands, and the existing webhook path mints the ticket. */
+    if (payMethod === "transfer") {
+      try {
+        const chargeRes = await fetch("https://api.paystack.co/charge", {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${process.env.PAYSTACK_SECRET_KEY}`,
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify({
+            email,
+            amount: totalAmount * 100, // Kobo
+            reference,
+            bank_transfer: {},
+            metadata: { eventId, ticketType, email, customerName: name },
+          }),
+        });
+        const chargeData = await chargeRes.json();
+
+        /* DEFENSIVE PARSE — the response shape varies by account/API
+           revision, so probe every plausible path for the details. */
+        const cd = chargeData?.data || {};
+        const bt = cd.bank_transfer || {};
+        const accountNumber =
+          bt.account_number || cd.account_number || bt.bank?.account_number;
+        const bankName =
+          bt.bank?.name || cd.bank?.name || bt.bank_name || cd.bank_name;
+        const accountName =
+          bt.account_name || cd.account_name || bt.bank?.account_name;
+        const expiresAt =
+          bt.account_expires_at ||
+          cd.account_expires_at ||
+          bt.expires_at ||
+          cd.expires_at;
+
+        if (chargeData?.status && accountNumber) {
+          return {
+            ok: true,
+            free: false,
+            transfer: true,
+            reference,
+            accountNumber,
+            bankName,
+            accountName,
+            expiresAt,
+            quantity: qty,
+            unitPrice: ticketPrice,
+            subtotal,
+            discountAmount,
+            platformFee,
+            processingFee: fees.processingFee,
+            total: totalAmount,
+          };
+        }
+        console.error(
+          "PAYSTACK TRANSFER CHARGE UNPARSEABLE:",
+          JSON.stringify(chargeData).slice(0, 300),
+        );
+      } catch (err) {
+        console.error("PAYSTACK TRANSFER CHARGE ERROR:", err.message);
+      }
+
+      /* Transfer unavailable (feature disabled / API error / shape we
+         can't parse) → void this attempt so the caller can retry via
+         the normal link path with a fresh reference. */
+      await Payment.updateOne({ reference }, { status: "FAILED" });
+      if (claimedDiscountId) {
+        // return the discount use consumed by this dead attempt
+        const { default: DiscountCode } = await import("../models/DiscountCode.js");
+        await DiscountCode.updateOne(
+          { _id: claimedDiscountId, uses: { $gt: 0 } },
+          { $inc: { uses: -1 } },
+        ).catch(() => {});
+      }
+      return {
+        ok: false,
+        status: 502,
+        transferUnavailable: true,
+        message: "Bank transfer isn't available right now",
+      };
+    }
 
     const paystackRes = await fetch(
       "https://api.paystack.co/transaction/initialize",
