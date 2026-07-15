@@ -6,6 +6,12 @@ import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 import { sendEmail } from "../services/email.service.js";
+/* Transport ONLY — the bot brain must never be imported here
+   (it imports payment.controller, which imports this file) */
+import {
+  whatsappConfigured,
+  deliverTicketToWhatsApp,
+} from "../services/whatsapp.service.js";
 
 const PUBLIC_API =
   process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
@@ -311,6 +317,20 @@ export const handlePaymentWebhook = async (req, res) => {
 
     // 📧 deliver the ticket to the guest's inbox (fire-and-forget)
     emailTicketToGuest(reference);
+
+    // 📲 WhatsApp buyers also get the QR in the chat (fire-and-forget)
+    Payment.findOne({ reference })
+      .populate("event", "title")
+      .then((p) => {
+        if (p?.waPhone && whatsappConfigured) {
+          return deliverTicketToWhatsApp({
+            phone: p.waPhone,
+            eventTitle: p.event?.title,
+            reference,
+          });
+        }
+      })
+      .catch(console.error);
 
     // 🔔 tell the organizer they made a sale (fire-and-forget)
     Payment.findOne({ reference })

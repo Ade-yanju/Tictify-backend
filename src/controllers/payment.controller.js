@@ -7,6 +7,10 @@ import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 import { resolveDiscount } from "./discount.controller.js";
 import { emailTicketToGuest } from "./webhook.controller.js";
+import {
+  whatsappConfigured,
+  deliverTicketToWhatsApp,
+} from "../services/whatsapp.service.js";
 
 /* Early-bird: a tier can carry a cheaper price until a cutoff */
 export function effectivePrice(tier, at = new Date()) {
@@ -112,15 +116,32 @@ function sanitizePromoter(raw) {
 }
 
 /* =====================================================
-   INITIATE PAYMENT (FREE OR PAYSTACK)
+   CREATE PAYMENT SESSION (FREE OR PAYSTACK)
+   Shared core used by BOTH the HTTP controller below and
+   the WhatsApp bot. Never throws — returns:
+     { ok:true,  free, reference, paymentUrl, ...feeBreakdown }
+     { ok:false, status, message }
 ===================================================== */
-export const initiatePayment = async (req, res) => {
+export async function createPaymentSession({
+  eventId,
+  ticketType,
+  quantity,
+  name,
+  email,
+  promoter: rawPromoter,
+  discountCode: rawDiscountCode,
+  waPhone: rawWaPhone,
+}) {
   try {
-    const { eventId, ticketType, email, name } = req.body;
-    const promoter = sanitizePromoter(req.body.promoter);
+    const promoter = sanitizePromoter(rawPromoter);
+    /* WhatsApp buyer phone rides along ONLY when it's a sane
+       international number — the webhook uses it for QR delivery. */
+    const waPhone = /^\d{10,15}$/.test(String(rawWaPhone || ""))
+      ? String(rawWaPhone)
+      : undefined;
 
     if (!eventId || !ticketType || !email || !name) {
-      return res.status(400).json({ message: "Missing required fields" });
+      return { ok: false, status: 400, message: "Missing required fields" };
     }
 
     const now = new Date();
@@ -128,38 +149,42 @@ export const initiatePayment = async (req, res) => {
     /* 1️⃣ LOAD EVENT */
     const event = await Event.findById(eventId);
     if (!event || event.status !== "LIVE") {
-      return res.status(400).json({ message: "Event unavailable" });
+      return { ok: false, status: 400, message: "Event unavailable" };
     }
 
     /* 2️⃣ TIME GUARDS */
     if (event.date <= now) {
-      return res
-        .status(400)
-        .json({ message: "Ticket sales have closed for this event" });
+      return {
+        ok: false,
+        status: 400,
+        message: "Ticket sales have closed for this event",
+      };
     }
 
     if (event.endDate <= now) {
       event.status = "ENDED";
       await event.save();
-      return res.status(400).json({ message: "This event has ended" });
+      return { ok: false, status: 400, message: "This event has ended" };
     }
 
     /* 3️⃣ FIND TICKET TYPE */
     const ticketConfig = event.ticketTypes.find((t) => t.name === ticketType);
     if (!ticketConfig) {
-      return res.status(400).json({ message: "Invalid ticket type" });
+      return { ok: false, status: 400, message: "Invalid ticket type" };
     }
 
     /* 4️⃣ ENFORCE QUANTITY (buyer can take 1-10 tickets per order) */
-    const qty = Math.min(10, Math.max(1, parseInt(req.body.quantity) || 1));
+    const qty = Math.min(10, Math.max(1, parseInt(quantity) || 1));
     const tierRemaining = ticketConfig.quantity - (ticketConfig.sold || 0);
     if (tierRemaining < qty) {
-      return res.status(400).json({
+      return {
+        ok: false,
+        status: 400,
         message:
           tierRemaining <= 0
             ? "This ticket type is sold out"
             : `Only ${tierRemaining} ${ticketType} ticket${tierRemaining > 1 ? "s" : ""} left`,
-      });
+      };
     }
 
     /* 5️⃣ ENFORCE EVENT CAPACITY */
@@ -173,9 +198,12 @@ export const initiatePayment = async (req, res) => {
         event.status = "ENDED";
         await event.save();
       }
-      return res.status(400).json({
-        message: left === 0 ? "Event is sold out" : `Only ${left} spots left for this event`,
-      });
+      return {
+        ok: false,
+        status: 400,
+        message:
+          left === 0 ? "Event is sold out" : `Only ${left} spots left for this event`,
+      };
     }
 
     const ticketPrice = effectivePrice(ticketConfig);
@@ -184,10 +212,14 @@ export const initiatePayment = async (req, res) => {
     /* Discount code: validate + atomically consume one use */
     let discountAmount = 0;
     let discountCode;
-    if (req.body.discountCode) {
-      const d = await resolveDiscount(event._id, req.body.discountCode);
+    if (rawDiscountCode) {
+      const d = await resolveDiscount(event._id, rawDiscountCode);
       if (!d) {
-        return res.status(400).json({ message: "Invalid or exhausted discount code" });
+        return {
+          ok: false,
+          status: 400,
+          message: "Invalid or exhausted discount code",
+        };
       }
       const { default: DiscountCode } = await import("../models/DiscountCode.js");
       const claimed = await DiscountCode.findOneAndUpdate(
@@ -196,7 +228,7 @@ export const initiatePayment = async (req, res) => {
         { new: true },
       );
       if (!claimed) {
-        return res.status(400).json({ message: "Discount code just sold out" });
+        return { ok: false, status: 400, message: "Discount code just sold out" };
       }
       discountCode = claimed.code;
       discountAmount = Math.round((ticketPrice * qty * claimed.percentOff) / 100);
@@ -221,6 +253,7 @@ export const initiatePayment = async (req, res) => {
         organizerAmount: 0,
         promoter,
         quantity: qty,
+        waPhone,
         status: "SUCCESS",
         provider: "FREE",
       });
@@ -244,10 +277,28 @@ export const initiatePayment = async (req, res) => {
       // 📧 ticket lands in their inbox automatically (fire-and-forget)
       emailTicketToGuest(reference);
 
-      return res.json({
+      // 📲 WhatsApp buyers get the QR in the chat too (fire-and-forget)
+      if (waPhone && whatsappConfigured) {
+        deliverTicketToWhatsApp({
+          phone: waPhone,
+          eventTitle: event.title,
+          reference,
+        }).catch(console.error);
+      }
+
+      return {
+        ok: true,
+        free: true,
         reference,
         paymentUrl: `${process.env.FRONTEND_URL}/success/${reference}`,
-      });
+        quantity: qty,
+        unitPrice: 0,
+        subtotal: 0,
+        discountAmount: 0,
+        platformFee: 0,
+        processingFee: 0,
+        total: 0,
+      };
     }
 
     /* ================= PAID EVENT (PAYSTACK) ================= */
@@ -271,6 +322,7 @@ export const initiatePayment = async (req, res) => {
       quantity: qty,
       discountCode,
       discountAmount,
+      waPhone,
       status: "PENDING",
       provider: "PAYSTACK",
     });
@@ -298,16 +350,51 @@ export const initiatePayment = async (req, res) => {
 
     if (!paystackData.status || !paystackData.data?.authorization_url) {
       await Payment.updateOne({ reference }, { status: "FAILED" });
-      return res
-        .status(500)
-        .json({ message: "Unable to initialize payment with Paystack" });
+      return {
+        ok: false,
+        status: 500,
+        message: "Unable to initialize payment with Paystack",
+      };
     }
 
-    res.json({ reference, paymentUrl: paystackData.data.authorization_url });
+    return {
+      ok: true,
+      free: false,
+      reference,
+      paymentUrl: paystackData.data.authorization_url,
+      quantity: qty,
+      unitPrice: ticketPrice,
+      subtotal,
+      discountAmount,
+      platformFee,
+      processingFee: fees.processingFee,
+      total: totalAmount,
+    };
   } catch (err) {
     console.error("INITIATE PAYMENT ERROR:", err);
-    res.status(500).json({ message: "Payment initialization failed" });
+    return { ok: false, status: 500, message: "Payment initialization failed" };
   }
+}
+
+/* =====================================================
+   INITIATE PAYMENT (HTTP) — thin wrapper over the shared core
+===================================================== */
+export const initiatePayment = async (req, res) => {
+  const result = await createPaymentSession({
+    eventId: req.body.eventId,
+    ticketType: req.body.ticketType,
+    quantity: req.body.quantity,
+    name: req.body.name,
+    email: req.body.email,
+    promoter: req.body.promoter,
+    discountCode: req.body.discountCode,
+    waPhone: req.body.waPhone,
+  });
+
+  if (!result.ok) {
+    return res.status(result.status || 500).json({ message: result.message });
+  }
+  return res.json({ reference: result.reference, paymentUrl: result.paymentUrl });
 };
 
 /* =====================================================
@@ -452,6 +539,16 @@ export const paymentCallback = async (req, res) => {
     // 📧 ticket email — only this path created the ticket (the webhook
     // skips creation when it already exists), so no duplicate sends
     emailTicketToGuest(reference);
+
+    // 📲 WhatsApp buyers also get the QR in the chat (fire-and-forget)
+    if (payment.waPhone && whatsappConfigured) {
+      deliverTicketToWhatsApp({
+        phone: payment.waPhone,
+        eventTitle: event?.title,
+        reference,
+      }).catch(console.error);
+    }
+
     return res.redirect(`${process.env.FRONTEND_URL}/success/${reference}`);
   } catch (err) {
     console.error("PAYMENT CALLBACK ERROR:", err);

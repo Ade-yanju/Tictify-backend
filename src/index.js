@@ -22,6 +22,7 @@ import ambassadorRoutes from "./routes/ambassador.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import discountRoutes from "./routes/discount.routes.js";
 import affiliateRoutes from "./routes/affiliate.routes.js";
+import whatsappRoutes from "./routes/whatsapp.routes.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
 
 const app = express();
@@ -58,12 +59,13 @@ app.use(
    check receives a parsed object and always fails. */
 app.use("/api/webhooks", express.raw({ type: "application/json" }));
 app.use("/api/payments/webhook", express.raw({ type: "application/json" }));
+app.use("/api/whatsapp/webhook", express.raw({ type: "application/json" }));
 
 app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "signup-otp-v1" }),
+  res.json({ ok: true, version: "whatsapp-bot-v1" }),
 );
 
 /* ================= ROUTES ================= */
@@ -84,6 +86,7 @@ app.use("/api/ambassadors", ambassadorRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/discounts", discountRoutes);
 app.use("/api/affiliates", affiliateRoutes);
+app.use("/api/whatsapp", whatsappRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;

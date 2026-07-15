@@ -67,6 +67,10 @@ const paymentSchema = new mongoose.Schema(
     discountCode: { type: String, uppercase: true, trim: true },
     discountAmount: { type: Number, default: 0 }, // ₦ taken off the subtotal
 
+    /* Buyer's WhatsApp number (digits only) when the order came through
+       the WhatsApp bot — the QR is delivered to this chat on success */
+    waPhone: { type: String, trim: true },
+
     reference: {
       type: String,
       unique: true,
