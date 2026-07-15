@@ -353,7 +353,15 @@ export const getTicketByReference = async (req, res) => {
    ownership, cancelled events, the atomic group admit.
    Returns structured data; never sends a response itself.
 ===================================================== */
-export async function performScan({ code, eventId, actingUser }) {
+export async function performScan({
+  code,
+  eventId,
+  actingUser,
+  clientScanId,
+  source,
+  deviceId,
+  at,
+}) {
   if (!code || typeof code !== "string") {
     return {
       admitted: false,
@@ -363,12 +371,28 @@ export async function performScan({ code, eventId, actingUser }) {
     };
   }
 
+  /* Idempotency identity for this scan. A caller that doesn't supply one
+     (the web scanner, the bot) gets a fresh id per call, so their behavior
+     is unchanged — the replay guard only ever matches a re-sent id. */
+  const scanId =
+    (typeof clientScanId === "string" && clientScanId) ||
+    crypto.randomBytes(12).toString("hex");
+  const scanSource = source || "online";
+  const scanAt = at ? new Date(at) : new Date();
+
   /* ── Normalize the scanned/typed code ── */
   const raw = code.trim();
   const or = [];
+  /* A legacy QR payload carries the holder's email (TICKET:<ref>:<email>).
+     We remember it so a *transferred* ticket's stale old payload can't
+     admit (its email no longer matches the current holder). A bare typed
+     reference has no email component and skips that check entirely, so
+     organizer gate entry by reference is unaffected. */
+  let payloadEmail = null;
   if (raw.toUpperCase().startsWith("TICKET:")) {
-    // legacy QR payload: TICKET:<reference>:<email>
-    const ref = raw.split(":")[1]?.trim();
+    const parts = raw.split(":");
+    const ref = parts[1]?.trim();
+    payloadEmail = parts[2]?.trim().toLowerCase() || null;
     if (ref) or.push({ paymentRef: ref }, { paymentRef: ref.toUpperCase() });
   } else {
     // hex qr code, or a reference typed by hand
@@ -402,6 +426,21 @@ export async function performScan({ code, eventId, actingUser }) {
     };
   }
 
+  /* ── Stale-holder guard: a legacy payload whose embedded email no
+     longer matches the current holder (i.e. the ticket was transferred)
+     is rejected. Non-transferred tickets match and pass through. ── */
+  if (
+    payloadEmail &&
+    String(found.buyerEmail || "").toLowerCase() !== payloadEmail
+  ) {
+    return {
+      admitted: false,
+      status: 410,
+      reason: "TRANSFERRED",
+      message: "This ticket was reissued to a new holder — the old QR is no longer valid",
+    };
+  }
+
   /* ── Cancelled events admit nobody ── */
   if (found.event?.status === "CANCELLED") {
     return {
@@ -428,17 +467,29 @@ export async function performScan({ code, eventId, actingUser }) {
     };
   }
 
-  /* ── Atomic group admission (prevents double-admit races) ── */
+  /* ── Atomic group admission (prevents double-admit races AND replays) ──
+     The extra "admits.clientScanId != scanId" guard makes a re-sent scan
+     a no-op rather than a new admit; the existing scanned / $expr guards
+     are preserved exactly. */
   const groupSize = Math.max(1, found.groupSize || 1);
   const ticket = await Ticket.findOneAndUpdate(
     {
       _id: found._id,
       scanned: { $ne: true }, // legacy fully-used tickets stay rejected
       $expr: { $lt: [{ $ifNull: ["$admittedCount", 0] }, groupSize] },
+      "admits.clientScanId": { $ne: scanId }, // replay of same scan → no-op
     },
     {
       $inc: { admittedCount: 1 },
-      $set: { scannedAt: new Date() },
+      $set: { scannedAt: scanAt },
+      $push: {
+        admits: {
+          at: scanAt,
+          source: scanSource,
+          clientScanId: scanId,
+          deviceId,
+        },
+      },
     },
     { new: true },
   );
@@ -450,6 +501,33 @@ export async function performScan({ code, eventId, actingUser }) {
   }
 
   if (!ticket) {
+    /* Distinguish an idempotent REPLAY (same clientScanId already logged)
+       from a genuinely used ticket. A replay returns the current state as
+       "already recorded" — NOT a false "already used" — so offline sync
+       retries are safe. */
+    const existing = await Ticket.findById(found._id).lean();
+    const alreadyRecorded = existing?.admits?.some(
+      (a) => a.clientScanId === scanId,
+    );
+    if (alreadyRecorded) {
+      const gs = Math.max(1, existing.groupSize || 1);
+      return {
+        admitted: true,
+        recorded: true,
+        status: 200,
+        reason: "ALREADY_RECORDED",
+        message:
+          gs > 1
+            ? `Already recorded — guest ${existing.admittedCount} of ${gs}`
+            : "Already recorded",
+        attendee: existing.buyerEmail,
+        guestName: existing.guestName || existing.buyerEmail,
+        ticketType: existing.ticketType,
+        admittedCount: existing.admittedCount,
+        groupSize: gs,
+        remaining: gs - existing.admittedCount,
+      };
+    }
     return {
       admitted: false,
       status: 409,
@@ -471,7 +549,7 @@ export async function performScan({ code, eventId, actingUser }) {
         ? `Access granted — guest ${ticket.admittedCount} of ${groupSize}`
         : "Access granted",
     attendee: ticket.buyerEmail,
-    guestName: ticket.buyerEmail,
+    guestName: ticket.guestName || ticket.buyerEmail,
     ticketType: ticket.ticketType,
     admittedCount: ticket.admittedCount,
     groupSize,
@@ -486,6 +564,9 @@ export const scanTicketController = async (req, res) => {
       code: req.body.code,
       eventId: req.body.eventId,
       actingUser: req.user,
+      clientScanId: req.body.clientScanId, // optional; generated if absent
+      deviceId: req.body.deviceId,
+      source: "online",
     });
 
     if (!result.admitted) {
@@ -503,6 +584,313 @@ export const scanTicketController = async (req, res) => {
   } catch (error) {
     console.error("SCAN ERROR:", error);
     return res.status(500).json({ message: "Scan processing error" });
+  }
+};
+
+/* =====================================================
+   🔁 TICKET TRANSFER (REISSUE QR TO A NEW HOLDER)
+   Shared core for the HTTP route AND the WhatsApp bot.
+   Ownership = proving the CURRENT holder's email.
+   Never throws; returns { ok, status, message, ... }.
+===================================================== */
+const TRANSFER_EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+
+export async function transferTicket({
+  reference,
+  ownerEmail,
+  newName,
+  newEmail,
+}) {
+  try {
+    const ref = String(reference || "").trim();
+    if (!ref) {
+      return { ok: false, status: 404, message: "Ticket not found" };
+    }
+
+    const ticket = await Ticket.findOne({ paymentRef: ref }).populate("event");
+    if (!ticket) {
+      return { ok: false, status: 404, message: "Ticket not found" };
+    }
+
+    /* ── Ownership: the caller must prove the CURRENT holder's email ── */
+    const owner = String(ownerEmail || "").trim().toLowerCase();
+    if (!owner || owner !== String(ticket.buyerEmail || "").toLowerCase()) {
+      return { ok: false, status: 403, message: "You don't own this ticket" };
+    }
+
+    /* ── A used ticket (any admit) can never be transferred ── */
+    if ((ticket.admittedCount || 0) > 0 || ticket.scanned) {
+      return {
+        ok: false,
+        status: 400,
+        message: "A used ticket can't be transferred",
+      };
+    }
+
+    /* ── Event must be live & upcoming ── */
+    const event = ticket.event;
+    const now = new Date();
+    if (event?.status === "CANCELLED") {
+      return {
+        ok: false,
+        status: 400,
+        message: "This event was cancelled — its tickets can't be transferred",
+      };
+    }
+    if (event?.endDate && new Date(event.endDate) <= now) {
+      return {
+        ok: false,
+        status: 400,
+        message: "This event has already passed — its tickets can't be transferred",
+      };
+    }
+
+    /* ── Validate the new holder ── */
+    const name = String(newName || "").trim();
+    const email = String(newEmail || "").trim().toLowerCase();
+    if (name.length < 2) {
+      return { ok: false, status: 400, message: "New holder name is required" };
+    }
+    if (!TRANSFER_EMAIL_RE.test(email)) {
+      return { ok: false, status: 400, message: "A valid new email is required" };
+    }
+
+    /* ── Atomic reissue: a brand-new qrCode invalidates the old QR, and
+       the guard rejects the transfer if a scan admits between our read
+       and write (admittedCount/scanned must still be zero/false). ── */
+    const newQrCode = crypto.randomBytes(16).toString("hex");
+    const newQrImage = await QRCode.toDataURL(newQrCode);
+    const fromEmail = ticket.buyerEmail;
+
+    const updated = await Ticket.findOneAndUpdate(
+      {
+        _id: ticket._id,
+        admittedCount: { $lte: 0 },
+        scanned: { $ne: true },
+      },
+      {
+        $set: {
+          qrCode: newQrCode,
+          qrImage: newQrImage,
+          buyerEmail: email,
+          guestName: name,
+          emailedAt: undefined,
+        },
+        $push: {
+          transfers: { at: new Date(), fromEmail, toEmail: email, toName: name },
+        },
+      },
+      { new: true },
+    );
+
+    if (!updated) {
+      // Someone admitted a guest in the split-second window
+      return {
+        ok: false,
+        status: 409,
+        message: "This ticket was just used — it can no longer be transferred",
+      };
+    }
+
+    /* ── Re-deliver to the NEW holder (lazy imports avoid any cycle) ── */
+    import("./webhook.controller.js")
+      .then(({ emailTicketToGuest }) => emailTicketToGuest(ref))
+      .catch((e) => console.error("Transfer re-email failed:", e.message));
+
+    /* WhatsApp the new QR if the original order carried a phone */
+    Payment.findOne({ reference: ref })
+      .then(async (payment) => {
+        if (!payment?.waPhone) return;
+        const { whatsappConfigured, deliverTicketToWhatsApp } = await import(
+          "../services/whatsapp.service.js"
+        );
+        if (whatsappConfigured) {
+          return deliverTicketToWhatsApp({
+            phone: payment.waPhone,
+            eventTitle: event?.title,
+            reference: ref,
+          });
+        }
+      })
+      .catch((e) => console.error("Transfer WhatsApp deliver failed:", e.message));
+
+    /* Tell the OLD owner the transfer happened (fire-and-forget) */
+    sendEmail({
+      to: fromEmail,
+      subject: `Your ticket for ${event?.title || "your event"} was transferred`,
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;background:#f9fafb;border-radius:16px;">
+          <h2 style="color:#1a1a1a;margin-top:0;">Ticket transferred ✅</h2>
+          <p style="color:#555;line-height:1.7;">Your ticket <strong>${ref}</strong> for
+          <strong>${event?.title || "your event"}</strong> has been transferred to a new holder
+          (<strong>${name}</strong>). Your old QR code will no longer admit at the gate.</p>
+          <p style="color:#B00020;font-size:13px;line-height:1.7;"><strong>Didn't do this?</strong>
+          Contact tictify@gmail.com right away.</p>
+        </div>
+      `,
+    }).catch((e) => console.error("Transfer notice email failed:", e.message));
+
+    return {
+      ok: true,
+      status: 200,
+      message: "Ticket transferred",
+      reference: ref,
+      eventTitle: event?.title || "",
+      newName: name,
+      newEmail: email,
+    };
+  } catch (err) {
+    console.error("TRANSFER TICKET ERROR:", err);
+    return { ok: false, status: 500, message: "Transfer failed" };
+  }
+}
+
+/* HTTP wrapper for POST /api/tickets/transfer */
+export const transferTicketController = async (req, res) => {
+  const result = await transferTicket({
+    reference: req.body.reference,
+    ownerEmail: req.body.ownerEmail,
+    newName: req.body.newName,
+    newEmail: req.body.newEmail,
+  });
+  if (!result.ok) {
+    return res.status(result.status || 500).json({ message: result.message });
+  }
+  return res.json({
+    message: "Ticket transferred — the new holder has been emailed their QR code.",
+    reference: result.reference,
+    newName: result.newName,
+    newEmail: result.newEmail,
+  });
+};
+
+/* =====================================================
+   🛰️ OFFLINE GATE — MANIFEST + SYNC
+   The web scanner caches this manifest so it can validate
+   guests with no signal, then replays queued admits.
+===================================================== */
+
+/* Shared ownership gate for the offline endpoints */
+async function loadOwnedEvent(req, res) {
+  const event = await Event.findById(req.params.eventId);
+  if (!event) {
+    res.status(404).json({ message: "Event not found" });
+    return null;
+  }
+  const isAdmin = req.user?.role === "admin";
+  if (!isAdmin && event.organizer.toString() !== req.user._id.toString()) {
+    res.status(403).json({ message: "Access denied" });
+    return null;
+  }
+  return event;
+}
+
+/* GET /api/tickets/gate/manifest/:eventId — the cached guest list */
+export const getGateManifest = async (req, res) => {
+  try {
+    const event = await loadOwnedEvent(req, res);
+    if (!event) return;
+
+    const tickets = await Ticket.find({ event: event._id })
+      .select("paymentRef qrCode guestName buyerEmail ticketType groupSize admittedCount scanned")
+      .lean();
+
+    return res.json({
+      eventTitle: event.title,
+      cancelled: event.status === "CANCELLED",
+      generatedAt: new Date().toISOString(),
+      tickets: tickets.map((t) => ({
+        reference: t.paymentRef,
+        qrCode: t.qrCode,
+        guestName: t.guestName || t.buyerEmail,
+        ticketType: t.ticketType || "",
+        groupSize: Math.max(1, t.groupSize || 1),
+        admittedCount: t.admittedCount || 0,
+        scanned: Boolean(t.scanned),
+      })),
+    });
+  } catch (err) {
+    console.error("GATE MANIFEST ERROR:", err);
+    return res.status(500).json({ message: "Failed to build manifest" });
+  }
+};
+
+/* POST /api/tickets/gate/sync/:eventId — replay queued offline admits.
+   Each item is idempotent by clientScanId; one bad item never fails the
+   whole batch. Per-item result lets the client reconcile + flag conflicts. */
+export const syncGateAdmits = async (req, res) => {
+  try {
+    const event = await loadOwnedEvent(req, res);
+    if (!event) return;
+
+    const admits = Array.isArray(req.body?.admits) ? req.body.admits : [];
+    if (admits.length > 1000) {
+      return res
+        .status(400)
+        .json({ message: "Too many admits in one sync (max 1000)" });
+    }
+
+    const results = [];
+    for (const a of admits) {
+      const code = a?.code;
+      const clientScanId = a?.clientScanId;
+      try {
+        const r = await performScan({
+          code,
+          eventId: String(event._id), // always scoped to this event
+          actingUser: req.user,
+          clientScanId,
+          deviceId: a?.deviceId,
+          at: a?.at,
+          source: "offline",
+        });
+
+        const result =
+          r.reason === "ADMITTED"
+            ? "admitted"
+            : r.reason === "ALREADY_RECORDED"
+              ? "already"
+              : "denied";
+
+        results.push({
+          code,
+          clientScanId,
+          result,
+          reason: r.reason,
+          message: r.message,
+          admittedCount: r.admittedCount ?? null,
+          groupSize: r.groupSize ?? null,
+        });
+      } catch (itemErr) {
+        // A single bad item is a per-item failure, never a batch 500
+        console.error("GATE SYNC ITEM ERROR:", itemErr.message);
+        results.push({
+          code,
+          clientScanId,
+          result: "denied",
+          reason: "ERROR",
+          message: "Could not process this admit",
+        });
+      }
+    }
+
+    const summary = results.reduce(
+      (acc, r) => {
+        acc[r.result] = (acc[r.result] || 0) + 1;
+        return acc;
+      },
+      { admitted: 0, already: 0, denied: 0 },
+    );
+
+    return res.json({
+      eventTitle: event.title,
+      processed: results.length,
+      summary,
+      results,
+    });
+  } catch (err) {
+    console.error("GATE SYNC ERROR:", err);
+    return res.status(500).json({ message: "Sync failed" });
   }
 };
 

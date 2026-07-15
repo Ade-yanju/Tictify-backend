@@ -1,5 +1,29 @@
 import mongoose from "mongoose";
 
+/* ── One entry per successful admit. clientScanId makes admits
+   idempotent: replaying the same id (offline sync retry, dup webhook)
+   is a no-op instead of a second admit or a false "already used". ── */
+const admitSchema = new mongoose.Schema(
+  {
+    at: { type: Date, default: Date.now },
+    source: { type: String }, // "online" | "offline" | "bot"
+    clientScanId: { type: String },
+    deviceId: { type: String },
+  },
+  { _id: false },
+);
+
+/* ── Audit trail for ticket reissues (Feature 2). ── */
+const transferSchema = new mongoose.Schema(
+  {
+    at: { type: Date, default: Date.now },
+    fromEmail: { type: String },
+    toEmail: { type: String },
+    toName: { type: String },
+  },
+  { _id: false },
+);
+
 const ticketSchema = new mongoose.Schema(
   {
     /* ================= EXISTING (UNCHANGED) ================= */
@@ -71,8 +95,26 @@ const ticketSchema = new mongoose.Schema(
       min: 0,
     },
 
+    /* Idempotent per-admit log — see admitSchema above */
+    admits: {
+      type: [admitSchema],
+      default: [],
+    },
+
     scannedAt: {
       type: Date,
+    },
+
+    /* Holder's display name (Feature 2 transfer sets this; older
+       tickets fall back to buyerEmail for display) */
+    guestName: {
+      type: String,
+    },
+
+    /* Reissue history (Feature 2) */
+    transfers: {
+      type: [transferSchema],
+      default: [],
     },
 
     emailedAt: {

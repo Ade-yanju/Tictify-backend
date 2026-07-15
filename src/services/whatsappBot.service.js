@@ -18,7 +18,7 @@ import {
   createPaymentSession,
 } from "../controllers/payment.controller.js";
 import { resolveDiscount } from "../controllers/discount.controller.js";
-import { performScan } from "../controllers/ticket.controller.js";
+import { performScan, transferTicket } from "../controllers/ticket.controller.js";
 
 /* =====================================================
    WHATSAPP BOT — THE BRAIN
@@ -299,6 +299,16 @@ export async function handleIncoming(phone, message, transport) {
         return await handlePayMethod(session, input, t, phone);
       case "TICKETS_EMAIL":
         return await handleTicketsEmail(session, input, t, phone);
+      case "TICKETS_MENU":
+        return await handleTicketsMenu(session, input, t, phone);
+      case "TRANSFER_PICK":
+        return await handleTransferPick(session, input, t, phone);
+      case "TRANSFER_NAME":
+        return await handleTransferName(session, input, t, phone);
+      case "TRANSFER_EMAIL":
+        return await handleTransferEmail(session, input, t, phone);
+      case "TRANSFER_CONFIRM":
+        return await handleTransferConfirm(session, input, t, phone);
       case "ORG_EMAIL":
         return await handleOrgEmail(session, input, t, phone);
       case "ORG_OTP":
@@ -741,9 +751,8 @@ async function handleTicketsEmail(session, input, t, phone) {
     .populate("event", "title date")
     .lean();
 
-  await setSession(session, "MENU", {});
-
   if (!tickets.length) {
+    await setSession(session, "MENU", {});
     return t.send(
       phone,
       `😕 No tickets found for *${email}*.\n\nDouble-check the email you used at checkout, or type *menu* to browse events.`,
@@ -764,7 +773,143 @@ async function handleTicketsEmail(session, input, t, phone) {
     );
   }
 
-  return t.send(phone, `That's everything! Type *menu* for the main menu.`);
+  /* Remember the proven owner + this ticket set so they can transfer one.
+     The email they just looked up with IS the ownership proof. */
+  await setSession(session, "TICKETS_MENU", {
+    ownerEmail: email,
+    tickets: tickets.map((tk) => ({
+      ref: tk.paymentRef,
+      title: tk.event?.title || "Event",
+    })),
+  });
+  return uiButtons(
+    t,
+    phone,
+    `That's everything! 🎟️\n\nGot the wrong person on a ticket? You can *transfer* it to someone else — they'll get a fresh QR and yours stops working.`,
+    [{ id: "transfer", title: "🔁 Transfer a ticket" }],
+  );
+}
+
+/* ================= TICKET TRANSFER (bot) ================= */
+async function handleTicketsMenu(session, input, t, phone) {
+  const lower = input.toLowerCase();
+  if (lower !== "transfer") {
+    await setSession(session, "MENU", {});
+    return showMainMenu(t, phone, session);
+  }
+
+  const tickets = Array.isArray(session.data?.tickets) ? session.data.tickets : [];
+  if (!tickets.length) {
+    await setSession(session, "MENU", {});
+    return showMainMenu(t, phone, session);
+  }
+
+  await setSession(session, "TRANSFER_PICK", { ...session.data });
+  return uiList(
+    t,
+    phone,
+    `🔁 *Transfer a ticket*\n\nWhich ticket do you want to hand over?`,
+    "Tickets",
+    tickets.map((tk, i) => ({
+      id: String(i + 1),
+      title: tk.title.slice(0, 24),
+      description: `Ref ${tk.ref}`.slice(0, 72),
+    })),
+  );
+}
+
+async function handleTransferPick(session, input, t, phone) {
+  const tickets = Array.isArray(session.data?.tickets) ? session.data.tickets : [];
+  const idx = parseInt(input, 10);
+  if (!Number.isInteger(idx) || idx < 1 || idx > tickets.length) {
+    return t.send(
+      phone,
+      `Please reply with a ticket number from the list (1-${tickets.length || 1}), or type *menu*.`,
+    );
+  }
+  const picked = tickets[idx - 1];
+  await setSession(session, "TRANSFER_NAME", {
+    ...session.data,
+    transferRef: picked.ref,
+    transferTitle: picked.title,
+  });
+  return t.send(
+    phone,
+    `👤 Who's the new holder? Send their *full name*.`,
+  );
+}
+
+async function handleTransferName(session, input, t, phone) {
+  if (input.trim().length < 2) {
+    return t.send(phone, `Please send the new holder's full name (at least 2 characters).`);
+  }
+  await setSession(session, "TRANSFER_EMAIL", {
+    ...session.data,
+    transferName: input.trim(),
+  });
+  return t.send(phone, `📧 And their *email address*? The new QR ticket goes there.`);
+}
+
+async function handleTransferEmail(session, input, t, phone) {
+  const email = input.toLowerCase();
+  if (!EMAIL_RE.test(email)) {
+    return t.send(
+      phone,
+      `That doesn't look like a valid email. Try again, or type *menu* to cancel.`,
+    );
+  }
+  const d = session.data || {};
+  await setSession(session, "TRANSFER_CONFIRM", { ...d, transferEmail: email });
+  return uiButtons(
+    t,
+    phone,
+    `🔁 *Confirm transfer*\n\n` +
+      `🎟️ ${d.transferTitle}\n` +
+      `Ref: ${d.transferRef}\n\n` +
+      `New holder: *${d.transferName}*\n` +
+      `Email: ${email}\n\n` +
+      `⚠️ Your current QR for this ticket will stop working immediately.`,
+    [
+      { id: "1", title: "✅ Transfer" },
+      { id: "2", title: "❌ Cancel" },
+    ],
+  );
+}
+
+async function handleTransferConfirm(session, input, t, phone) {
+  const d = session.data || {};
+  if (input === "2") {
+    await setSession(session, "MENU", {});
+    return t.send(phone, `Okay, cancelled — nothing was transferred.\n\nType *menu* anytime.`);
+  }
+  if (input !== "1") {
+    return t.send(phone, `Tap ✅ Transfer or ❌ Cancel (or reply *1* / *2*).`);
+  }
+
+  /* Ownership proof = the email they looked their tickets up with */
+  const result = await transferTicket({
+    reference: d.transferRef,
+    ownerEmail: d.ownerEmail,
+    newName: d.transferName,
+    newEmail: d.transferEmail,
+  });
+
+  await setSession(session, "MENU", {});
+
+  if (!result.ok) {
+    return t.send(
+      phone,
+      `😕 Couldn't transfer that ticket: ${result.message}.\n\nType *menu* to start over.`,
+    );
+  }
+
+  return t.send(
+    phone,
+    `✅ *Ticket transferred!*\n\n` +
+      `*${result.newName}* is now the holder of your *${result.eventTitle || "event"}* ticket.\n` +
+      `📧 Their fresh QR is on its way to ${result.newEmail}.\n\n` +
+      `Your old QR for this ticket no longer works. Type *menu* anytime.`,
+  );
 }
 
 /* ================= ORGANIZER: LINK ACCOUNT (EMAIL) ================= */
@@ -1000,6 +1145,8 @@ async function runScanAttempt(session, code, t, phone) {
     code,
     eventId: session.data?.scanEventId, // always scoped to the picked event
     actingUser: { _id: session.organizerUser, role: "organizer" },
+    clientScanId: crypto.randomBytes(12).toString("hex"), // fresh per tap
+    source: "bot",
   });
 
   if (!result.admitted) {
