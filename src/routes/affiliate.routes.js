@@ -119,6 +119,7 @@ router.get("/join/callback", async (req, res) => {
         role: "affiliate",
         affiliateCode,
         isActive: true,
+        emailVerified: true, // paid via Paystack — no OTP gate for affiliates
       });
     } else {
       /* Existing account paid the join fee — grant the affiliate code

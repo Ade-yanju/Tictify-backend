@@ -33,6 +33,14 @@ const userSchema = new mongoose.Schema(
     /* Password reset (forgot-password flow) */
     resetTokenHash: String,
     resetTokenExp: Date,
+
+    /* Email verification (OTP at signup). Default TRUE so every
+       existing account is grandfathered — only accounts explicitly
+       created with emailVerified:false are gated at login. */
+    emailVerified: { type: Boolean, default: true },
+    verifyOtpHash: String,
+    verifyOtpExpires: Date,
+    verifyOtpAttempts: { type: Number, default: 0 },
   },
   { timestamps: true }
 );

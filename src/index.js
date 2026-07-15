@@ -63,7 +63,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "admin-affiliates-v1" }),
+  res.json({ ok: true, version: "signup-otp-v1" }),
 );
 
 /* ================= ROUTES ================= */
