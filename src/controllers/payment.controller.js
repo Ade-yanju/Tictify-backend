@@ -5,6 +5,7 @@ import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
+import { salesCloseAt } from "./event.controller.js";
 import { resolveDiscount } from "./discount.controller.js";
 import { emailTicketToGuest } from "./webhook.controller.js";
 import {
@@ -157,7 +158,10 @@ export async function createPaymentSession({
     }
 
     /* 2️⃣ TIME GUARDS */
-    if (event.date <= now) {
+    /* Sales run until salesCloseAt (defaults to endDate) — NOT until the
+       event starts. This is what the event page advertises via isSelling,
+       and it's what lets organizers sell at the door. */
+    if (salesCloseAt(event) <= now) {
       return {
         ok: false,
         status: 400,
@@ -480,11 +484,31 @@ export const initiatePayment = async (req, res) => {
     promoter: req.body.promoter,
     discountCode: req.body.discountCode,
     waPhone: req.body.waPhone,
+    /* Default "link" — callers that don't ask for transfer are unaffected */
+    payMethod: req.body.payMethod === "transfer" ? "transfer" : "link",
   });
 
   if (!result.ok) {
+    /* Transfer couldn't be provisioned — NOT an error the guest should
+       see. 200 lets the client transparently retry on the card path. */
+    if (result.transferUnavailable) {
+      return res.json({ transferUnavailable: true });
+    }
     return res.status(result.status || 500).json({ message: result.message });
   }
+
+  if (result.transfer) {
+    return res.json({
+      transfer: true,
+      reference: result.reference,
+      accountNumber: result.accountNumber,
+      bankName: result.bankName,
+      accountName: result.accountName,
+      expiresAt: result.expiresAt,
+      total: result.total,
+    });
+  }
+
   return res.json({ reference: result.reference, paymentUrl: result.paymentUrl });
 };
 

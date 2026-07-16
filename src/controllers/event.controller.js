@@ -1,5 +1,37 @@
 import Event from "../models/Event.js";
 
+/* =====================================================
+   SALES WINDOW — the single source of truth for "can
+   this event still sell a ticket?".
+
+   Defaults to endDate: sales run until the event ENDS,
+   which is what the event page has always promised and
+   what lets organizers sell at the door. Organizers can
+   close sales earlier by setting salesEndAt.
+
+   NOTE: this governs SELLING only. The event lifecycle
+   (LIVE → ENDED) stays keyed to endDate.
+===================================================== */
+export function salesCloseAt(event) {
+  return event.salesEndAt || event.endDate;
+}
+
+/* Shared validation for a proposed salesEndAt against the event's
+   end time. Returns an error message, or null when valid. */
+function validateSalesEndAt(salesEndAt, endDate, now = new Date()) {
+  const when = new Date(salesEndAt);
+  if (isNaN(when.getTime())) {
+    return "Invalid ticket sales close time";
+  }
+  if (when > new Date(endDate)) {
+    return "Ticket sales must close by the time the event ends";
+  }
+  if (when <= now) {
+    return "Ticket sales must close in the future";
+  }
+  return null;
+}
+
 /* ================= CREATE EVENT ================= */
 
 export const createEvent = async (req, res) => {
@@ -10,6 +42,7 @@ export const createEvent = async (req, res) => {
       location,
       date, // start time
       endDate, // end time
+      salesEndAt, // when ticket sales stop (defaults to endDate)
       capacity,
       ticketTypes,
       status = "DRAFT",
@@ -36,6 +69,14 @@ export const createEvent = async (req, res) => {
         .json({ message: "Event end time must be after start time" });
     }
 
+    /* Sales window — absent means "sell until the event ends" */
+    let salesClose = new Date(endDate);
+    if (salesEndAt != null && salesEndAt !== "") {
+      const err = validateSalesEndAt(salesEndAt, endDate);
+      if (err) return res.status(400).json({ message: err });
+      salesClose = new Date(salesEndAt);
+    }
+
     const event = await Event.create({
       organizer: req.user._id,
       title,
@@ -43,6 +84,7 @@ export const createEvent = async (req, res) => {
       location,
       date: new Date(date),
       endDate: new Date(endDate),
+      salesEndAt: salesClose,
       capacity,
       ticketTypes: ticketTypes.map((t) => ({
         ...t,
@@ -155,12 +197,16 @@ export const getEventById = async (req, res) => {
     }
 
     const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
+    const closeAt = salesCloseAt(event);
 
     res.json({
       ...event.toObject(),
       isSoldOut: sold >= event.capacity,
-      isSelling:
-        event.status === "LIVE" && now < event.endDate && sold < event.capacity,
+      /* Matches createPaymentSession's guard exactly — the page never
+         promises a sale the checkout will refuse. */
+      isSelling: event.status === "LIVE" && now < closeAt && sold < event.capacity,
+      salesEndAt: closeAt,
+      salesClosed: now >= closeAt,
     });
   } catch (err) {
     console.error("GET EVENT ERROR:", err);
@@ -378,6 +424,19 @@ export const updateEvent = async (req, res) => {
     if (b.endDate) event.endDate = new Date(b.endDate);
     if (event.endDate <= event.date) {
       return res.status(400).json({ message: "End time must be after start time" });
+    }
+
+    /* Sales window — validated against the endDate as it stands AFTER
+       this request, so start/end/sales edits land atomically. Setting a
+       future time REOPENS sales on an event whose window already passed. */
+    if (b.salesEndAt != null) {
+      if (b.salesEndAt === "") {
+        event.salesEndAt = undefined; // back to "sell until the event ends"
+      } else {
+        const err = validateSalesEndAt(b.salesEndAt, event.endDate);
+        if (err) return res.status(400).json({ message: err });
+        event.salesEndAt = new Date(b.salesEndAt);
+      }
     }
 
     const totalSold = event.ticketTypes.reduce((s, t) => s + (t.sold || 0), 0);

@@ -36,6 +36,11 @@ const eventSchema = new mongoose.Schema(
       required: true, // 🔥 NEW: EVENT END TIME
     },
 
+    /* When ticket sales stop. Optional — when unset, sales run right up
+       to endDate (so organizers can sell at the door). Never read
+       directly: use salesCloseAt(event) so the fallback always applies. */
+    salesEndAt: { type: Date },
+
     banner: {
       type: String,
       required: true,

@@ -65,7 +65,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "gate-offline-transfer-v1" }),
+  res.json({ ok: true, version: "sales-window-v1" }),
 );
 
 /* ================= ROUTES ================= */
