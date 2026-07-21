@@ -13,6 +13,32 @@ import {
   deliverTicketToWhatsApp,
 } from "../services/whatsapp.service.js";
 
+/* =====================================================
+   PAYMENT-METHOD CAPABILITY
+   Paystack only provisions dedicated transfer accounts for
+   accounts where that feature is enabled. Offering it when
+   it isn't produces an instantly-FAILED payment and a guest
+   who can't buy — so the first refusal switches it off for
+   everyone until the TTL lapses, and the checkout stops
+   showing it. Re-probes itself an hour later, so enabling
+   the feature on Paystack needs no redeploy.
+===================================================== */
+const TRANSFER_RECHECK_MS = 60 * 60 * 1000;
+let transferUnavailableSince = 0;
+
+export function markTransferUnavailable() {
+  transferUnavailableSince = Date.now();
+}
+
+export function transferAvailable() {
+  if (!transferUnavailableSince) return true;
+  return Date.now() - transferUnavailableSince > TRANSFER_RECHECK_MS;
+}
+
+/* Public: what the checkout may offer right now */
+export const getPaymentMethods = (req, res) =>
+  res.json({ card: true, transfer: transferAvailable() });
+
 /* Early-bird: a tier can carry a cheaper price until a cutoff */
 export function effectivePrice(tier, at = new Date()) {
   if (
@@ -405,6 +431,7 @@ export async function createPaymentSession({
       /* Transfer unavailable (feature disabled / API error / shape we
          can't parse) → void this attempt so the caller can retry via
          the normal link path with a fresh reference. */
+      markTransferUnavailable();
       await Payment.updateOne({ reference }, { status: "FAILED" });
       if (claimedDiscountId) {
         // return the discount use consumed by this dead attempt

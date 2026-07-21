@@ -7,6 +7,7 @@ import {
   paymentCallback,
   getTicketByReference,
   quoteFees,
+  getPaymentMethods,
 } from "../controllers/payment.controller.js";
 import { getPaymentStatus } from "../controllers/payment.status.controller.js";
 
@@ -27,6 +28,7 @@ const statusLimiter = rateLimit({
 router.post("/webhook", handlePaymentWebhook);
 
 router.get("/quote", quoteFees);
+router.get("/methods", getPaymentMethods);
 router.post("/initiate", initiatePayment);
 router.post("/payments/verify", verifyPayment);
 router.get("/status/:reference", statusLimiter, getPaymentStatus);
