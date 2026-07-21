@@ -20,10 +20,14 @@ import {
    it isn't produces an instantly-FAILED payment and a guest
    who can't buy — so the first refusal switches it off for
    everyone until the TTL lapses, and the checkout stops
-   showing it. Re-probes itself an hour later, so enabling
-   the feature on Paystack needs no redeploy.
+   showing it.
+
+   Opt-in by design: a fresh boot must never volunteer a guest to
+   discover the feature is off. Set PAYSTACK_TRANSFER_ENABLED=true
+   once Paystack confirms dedicated accounts are live on the merchant.
 ===================================================== */
 const TRANSFER_RECHECK_MS = 60 * 60 * 1000;
+const TRANSFER_ENABLED = process.env.PAYSTACK_TRANSFER_ENABLED === "true";
 let transferUnavailableSince = 0;
 
 export function markTransferUnavailable() {
@@ -31,7 +35,9 @@ export function markTransferUnavailable() {
 }
 
 export function transferAvailable() {
+  if (!TRANSFER_ENABLED) return false;
   if (!transferUnavailableSince) return true;
+  // Enabled but Paystack refused → back off, then re-probe
   return Date.now() - transferUnavailableSince > TRANSFER_RECHECK_MS;
 }
 
