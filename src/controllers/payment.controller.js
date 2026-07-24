@@ -6,6 +6,7 @@ import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 import { salesCloseAt } from "./event.controller.js";
+import { findEventByIdOrSlug } from "../utils/resolveEvent.js";
 import { resolveDiscount } from "./discount.controller.js";
 import { emailTicketToGuest } from "./webhook.controller.js";
 import {
@@ -104,7 +105,9 @@ export const quoteFees = async (req, res) => {
     let discountApplied = null;
     const { eventId, ticketType, code } = req.query;
     if (eventId && ticketType) {
-      const ev = await Event.findById(eventId);
+      /* The checkout page passes whatever is in its URL — which is now
+         a slug, so this must resolve both forms. */
+      const ev = await findEventByIdOrSlug(eventId);
       const tier = ev?.ticketTypes.find((t) => t.name === ticketType);
       if (tier) unit = effectivePrice(tier);
       if (ev && code) {
@@ -183,11 +186,15 @@ export async function createPaymentSession({
 
     const now = new Date();
 
-    /* 1️⃣ LOAD EVENT */
-    const event = await Event.findById(eventId);
+    /* 1️⃣ LOAD EVENT — the caller may hand us a slug (checkout URLs are
+       slugs now) or an ObjectId (old links, the WhatsApp bot). */
+    const event = await findEventByIdOrSlug(eventId);
     if (!event || event.status !== "LIVE") {
       return { ok: false, status: 400, message: "Event unavailable" };
     }
+    /* From here on the id must be the REAL ObjectId — it is written to
+       Payment.event and shipped to Paystack as metadata. */
+    eventId = event._id;
 
     /* 2️⃣ TIME GUARDS */
     /* Sales run until salesCloseAt (defaults to endDate) — NOT until the

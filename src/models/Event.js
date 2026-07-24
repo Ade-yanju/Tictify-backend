@@ -22,6 +22,13 @@ const eventSchema = new mongoose.Schema(
     },
 
     title: { type: String, required: true },
+
+    /* Human-readable URL key: slugify(title) + "-" + last 8 chars of
+       _id (see utils/resolveEvent.js). Not unique and not required —
+       the id suffix already guarantees uniqueness, and every lookup
+       falls back to the _id so pre-slug links never break. */
+    slug: { type: String, index: true },
+
     description: { type: String, required: true },
     location: { type: String, required: true },
 

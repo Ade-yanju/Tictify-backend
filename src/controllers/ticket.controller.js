@@ -2,8 +2,8 @@ import crypto from "crypto";
 import mongoose from "mongoose";
 import QRCode from "qrcode";
 import Ticket from "../models/Ticket.js";
-import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
+import { findEventByIdOrSlug } from "../utils/resolveEvent.js";
 import { sendEmail } from "../services/email.service.js";
 
 /* Public base URL of THIS backend — used for QR image links in emails
@@ -18,7 +18,7 @@ const PUBLIC_API =
 export const getGateStats = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const event = await Event.findById(eventId);
+    const event = await findEventByIdOrSlug(eventId);
     if (!event || event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -56,7 +56,7 @@ export const getGateStats = async (req, res) => {
 export const getPromoterStats = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const event = await Event.findById(eventId);
+    const event = await findEventByIdOrSlug(eventId);
     if (!event || event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -107,7 +107,7 @@ export const getPromoterStats = async (req, res) => {
 export const exportGuestList = async (req, res) => {
   try {
     const { eventId } = req.params;
-    const event = await Event.findById(eventId);
+    const event = await findEventByIdOrSlug(eventId);
     if (!event || event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -772,7 +772,7 @@ export const transferTicketController = async (req, res) => {
 
 /* Shared ownership gate for the offline endpoints */
 async function loadOwnedEvent(req, res) {
-  const event = await Event.findById(req.params.eventId);
+  const event = await findEventByIdOrSlug(req.params.eventId);
   if (!event) {
     res.status(404).json({ message: "Event not found" });
     return null;
@@ -929,7 +929,7 @@ export const getOrganizerTicketSales = async (req, res) => {
 export const createFreeTicket = async (req, res) => {
   try {
     const { eventId, email, ticketType } = req.body;
-    const event = await Event.findById(eventId);
+    const event = await findEventByIdOrSlug(eventId);
     if (!event || event.status !== "LIVE")
       return res.status(400).json({ message: "Invalid event" });
 

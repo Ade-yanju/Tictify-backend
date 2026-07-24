@@ -1,5 +1,5 @@
 import DiscountCode from "../models/DiscountCode.js";
-import Event from "../models/Event.js";
+import { findEventByIdOrSlug } from "../utils/resolveEvent.js";
 
 const CODE_RE = /^[A-Z0-9_-]{2,20}$/;
 
@@ -9,7 +9,7 @@ export const createDiscount = async (req, res) => {
     const { eventId, percentOff, maxUses } = req.body;
     const code = String(req.body.code || "").trim().toUpperCase();
 
-    const event = await Event.findById(eventId);
+    const event = await findEventByIdOrSlug(eventId);
     if (!event || event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }
@@ -40,7 +40,7 @@ export const createDiscount = async (req, res) => {
 /* ORGANIZER: list + toggle */
 export const listDiscounts = async (req, res) => {
   try {
-    const event = await Event.findById(req.params.eventId);
+    const event = await findEventByIdOrSlug(req.params.eventId);
     if (!event || event.organizer.toString() !== req.user._id.toString()) {
       return res.status(403).json({ message: "Access denied" });
     }

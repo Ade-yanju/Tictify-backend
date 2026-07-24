@@ -24,6 +24,7 @@ import discountRoutes from "./routes/discount.routes.js";
 import affiliateRoutes from "./routes/affiliate.routes.js";
 import whatsappRoutes from "./routes/whatsapp.routes.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
+import { reconcileAllSold } from "./services/soldReconcile.service.js";
 
 const app = express();
 
@@ -65,7 +66,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "availability-v1" }),
+  res.json({ ok: true, version: "slugs-recount-v1" }),
 );
 
 /* ================= ROUTES ================= */
@@ -112,4 +113,19 @@ setInterval(
 setTimeout(
   () => processPendingPayouts().catch((e) => console.error("SWEEP:", e)),
   20 * 1000, // catch-up pass shortly after every deploy/restart
+);
+
+/* Self-healing sold counters: each tier's `sold` is recounted from the
+   SUCCESS payments that are its only real source of truth, so a missed
+   increment can't silently corrupt what guests see OR what checkout
+   allows. Backfills missing event slugs in the same pass. Offset from
+   the payout catch-up so two sweeps never fight for the same dyno. */
+const SOLD_SWEEP_MS = 15 * 60 * 1000;
+setInterval(
+  () => reconcileAllSold().catch((e) => console.error("SOLD SWEEP:", e)),
+  SOLD_SWEEP_MS,
+);
+setTimeout(
+  () => reconcileAllSold().catch((e) => console.error("SOLD SWEEP:", e)),
+  60 * 1000, // catch-up pass ~60s after boot
 );

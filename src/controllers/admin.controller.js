@@ -2,6 +2,8 @@ import User from "../models/User.js";
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import { computeAvailability } from "../utils/availability.js";
+import { findEventByIdOrSlug } from "../utils/resolveEvent.js";
+import { reconcileEventSold } from "../services/soldReconcile.service.js";
 
 export const getAdminOrganizers = async (req, res) => {
   try {
@@ -44,8 +46,17 @@ export const getAdminEvents = async (req, res) => {
           event: e._id,
         });
 
+        /* Low-traffic admin page: recount against SUCCESS payments so
+           the figures below are database truth, not a drifted counter.
+           A recount failure degrades to the stored counters rather
+           than failing the whole listing. */
+        await reconcileEventSold(e).catch((err) =>
+          console.error("ADMIN RECONCILE:", err?.message || err),
+        );
+
         return {
           _id: e._id,
+          slug: e.slug || null,
           title: e.title,
           date: e.date,
           capacity: e.capacity,
@@ -67,6 +78,30 @@ export const getAdminEvents = async (req, res) => {
     res.status(500).json({ message: "Failed to load events" });
   }
 };
+/* =====================================================
+   ADMIN: FORCE A RECOUNT OF ONE EVENT
+   Runs the same Payment-derived reconciliation the 15-minute
+   sweep runs, but on demand — so an admin who suspects a
+   drifted counter doesn't have to wait for the next tick.
+===================================================== */
+export const adminRecountEvent = async (req, res) => {
+  try {
+    const event = await findEventByIdOrSlug(req.params.id);
+    if (!event) return res.status(404).json({ message: "Event not found" });
+
+    const { changed, drifts } = await reconcileEventSold(event);
+
+    return res.json({
+      changed,
+      drifts,
+      availability: computeAvailability(event),
+    });
+  } catch (err) {
+    console.error("ADMIN RECOUNT ERROR:", err);
+    return res.status(500).json({ message: "Recount failed" });
+  }
+};
+
 /* ================= ADMIN ANALYTICS ================= */
 export const getAdminAnalytics = async (_, res) => {
   const revenueByMonth = await Ticket.aggregate([

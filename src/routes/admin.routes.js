@@ -7,6 +7,7 @@ import { adminAnalytics, adminFinance, adminReconcilePending } from "../controll
 import {
   getAdminOrganizers,
   getAdminEvents,
+  adminRecountEvent,
 } from "../controllers/admin.controller.js";
 import {
   getAdminAffiliates,
@@ -30,6 +31,8 @@ router.get("/organizers", authenticate, adminOnly, getAdminOrganizers);
 /* ================= EVENTS ================= */
 router.get("/events", authenticate, adminOnly, getAdminEvents);
 router.patch("/events/:id/cancel", authenticate, adminOnly, adminCancelEvent);
+/* Force an immediate Payment-derived recount of one event's tiers */
+router.post("/events/:id/recount", authenticate, adminOnly, adminRecountEvent);
 
 /* ================= AFFILIATES ================= */
 router.get("/affiliates", authenticate, adminOnly, getAdminAffiliates);

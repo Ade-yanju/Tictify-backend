@@ -1,5 +1,8 @@
+import mongoose from "mongoose";
 import Event from "../models/Event.js";
 import { computeAvailability } from "../utils/availability.js";
+import { buildEventSlug, findEventByIdOrSlug } from "../utils/resolveEvent.js";
+import { reconcileEventSold } from "../services/soldReconcile.service.js";
 
 /* =====================================================
    SALES WINDOW — the single source of truth for "can
@@ -78,7 +81,13 @@ export const createEvent = async (req, res) => {
       salesClose = new Date(salesEndAt);
     }
 
+    /* The slug needs the _id, so mint the _id first and write the
+       document once — no save-then-patch-then-save round trip. */
+    const _id = new mongoose.Types.ObjectId();
+
     const event = await Event.create({
+      _id,
+      slug: buildEventSlug(title, _id),
       organizer: req.user._id,
       title,
       description,
@@ -133,8 +142,20 @@ export const getOrganizerEvents = async (req, res) => {
       organizer: req.user._id,
     }).sort("-createdAt");
 
+    /* Low-traffic, accuracy-critical page: recount each event's tiers
+       against its SUCCESS payments before reporting availability, so
+       an organizer never plans around a drifted counter. A recount
+       failure must not take the whole listing down. */
+    await Promise.all(
+      events.map((event) =>
+        reconcileEventSold(event).catch((err) =>
+          console.error("ORGANIZER RECONCILE:", err?.message || err),
+        ),
+      ),
+    );
+
     /* Organizers get the full per-tier breakdown on the listing —
-       additive, every existing field is preserved. */
+       additive, every existing field is preserved (incl. slug). */
     res.json(
       events.map((event) => ({
         ...event.toObject(),
@@ -201,7 +222,9 @@ export const getEventById = async (req, res) => {
   try {
     const now = new Date();
 
-    const event = await Event.findById(req.params.id);
+    /* Accepts the pretty slug, a stale slug, or the raw ObjectId every
+       link shared before slugs existed still carries. */
+    const event = await findEventByIdOrSlug(req.params.id);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
@@ -239,7 +262,7 @@ export const publishEvent = async (req, res) => {
   try {
     const now = new Date();
 
-    const event = await Event.findById(req.params.id);
+    const event = await findEventByIdOrSlug(req.params.id);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
@@ -264,7 +287,10 @@ export const publishEvent = async (req, res) => {
 };
 
 export const endEvent = async (req, res) => {
-  await Event.findByIdAndUpdate(req.params.id, { status: "ENDED" });
+  const event = await findEventByIdOrSlug(req.params.id);
+  if (!event) return res.status(404).json({ message: "Event not found" });
+  event.status = "ENDED";
+  await event.save();
   res.json({ message: "Event ended" });
 };
 
@@ -273,7 +299,7 @@ export const deleteEvent = async (req, res) => {
   try {
     const now = new Date();
 
-    const event = await Event.findById(req.params.id);
+    const event = await findEventByIdOrSlug(req.params.id);
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }
@@ -312,15 +338,20 @@ export const deleteEvent = async (req, res) => {
 ===================================================== */
 export const adminCancelEvent = async (req, res) => {
   try {
-    const event = await Event.findOneAndUpdate(
-      { _id: req.params.id, status: { $in: ["LIVE", "DRAFT"] } },
-      {
-        status: "CANCELLED",
-        cancelledAt: new Date(),
-        cancelReason: String(req.body?.reason || "").slice(0, 300),
-      },
-      { new: true },
-    );
+    const target = await findEventByIdOrSlug(req.params.id);
+    /* Still an atomic claim on the _id — resolving the slug first only
+       tells us WHICH document to claim. */
+    const event = target
+      ? await Event.findOneAndUpdate(
+          { _id: target._id, status: { $in: ["LIVE", "DRAFT"] } },
+          {
+            status: "CANCELLED",
+            cancelledAt: new Date(),
+            cancelReason: String(req.body?.reason || "").slice(0, 300),
+          },
+          { new: true },
+        )
+      : null;
     if (!event) {
       return res
         .status(400)
@@ -419,11 +450,10 @@ export const adminCancelEvent = async (req, res) => {
 ===================================================== */
 export const updateEvent = async (req, res) => {
   try {
-    const event = await Event.findOne({
-      _id: req.params.id,
-      organizer: req.user._id,
-    });
-    if (!event) return res.status(404).json({ message: "Event not found" });
+    const event = await findEventByIdOrSlug(req.params.id);
+    if (!event || String(event.organizer) !== String(req.user._id)) {
+      return res.status(404).json({ message: "Event not found" });
+    }
     if (["ENDED", "CANCELLED"].includes(event.status)) {
       return res
         .status(400)
@@ -431,8 +461,17 @@ export const updateEvent = async (req, res) => {
     }
 
     const b = req.body || {};
+    const previousTitle = event.title;
     for (const f of ["title", "description", "location", "city", "banner"]) {
       if (b[f] != null && String(b[f]).trim()) event[f] = String(b[f]).trim();
+    }
+
+    /* Retitled => a fresh slug. The id suffix is unchanged, so every
+       link already shared under the OLD slug still resolves
+       (findEventByIdOrSlug falls back to the suffix). Also mints the
+       slug for a pre-slug event the sweep hasn't reached yet. */
+    if (event.title !== previousTitle || !event.slug) {
+      event.slug = buildEventSlug(event.title, event._id);
     }
     if (b.category) event.category = b.category;
     if (b.bannerFit) event.bannerFit = b.bannerFit === "contain" ? "contain" : "cover";
