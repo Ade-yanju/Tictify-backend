@@ -1,4 +1,5 @@
 import Event from "../models/Event.js";
+import { computeAvailability } from "../utils/availability.js";
 
 /* =====================================================
    SALES WINDOW — the single source of truth for "can
@@ -132,7 +133,14 @@ export const getOrganizerEvents = async (req, res) => {
       organizer: req.user._id,
     }).sort("-createdAt");
 
-    res.json(events);
+    /* Organizers get the full per-tier breakdown on the listing —
+       additive, every existing field is preserved. */
+    res.json(
+      events.map((event) => ({
+        ...event.toObject(),
+        availability: computeAvailability(event),
+      })),
+    );
   } catch (err) {
     console.error("GET ORGANIZER EVENTS ERROR:", err);
     res.status(500).json({ message: "Unable to load events" });
@@ -173,7 +181,15 @@ export const getPublicEvents = async (_, res) => {
       return sold < event.capacity;
     });
 
-    res.json(availableEvents);
+    /* Cards show availability inline — attach sold/remaining here so the
+       list never needs an N+1 fetch per event. Additive: every existing
+       field is preserved. */
+    res.json(
+      availableEvents.map((event) => {
+        const a = computeAvailability(event);
+        return { ...event.toObject(), sold: a.totalSold, remaining: a.remaining };
+      }),
+    );
   } catch (err) {
     console.error("GET PUBLIC EVENTS ERROR:", err);
     res.status(500).json({ message: "Unable to load events" });
@@ -207,6 +223,10 @@ export const getEventById = async (req, res) => {
       isSelling: event.status === "LIVE" && now < closeAt && sold < event.capacity,
       salesEndAt: closeAt,
       salesClosed: now >= closeAt,
+      /* Sold/remaining per tier AND for the event, computed with the
+         exact same arithmetic createPaymentSession uses to refuse a
+         purchase — so the page can never promise what checkout denies. */
+      availability: computeAvailability(event),
     });
   } catch (err) {
     console.error("GET EVENT ERROR:", err);

@@ -1,6 +1,7 @@
 import User from "../models/User.js";
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
+import { computeAvailability } from "../utils/availability.js";
 
 export const getAdminOrganizers = async (req, res) => {
   try {
@@ -52,6 +53,10 @@ export const getAdminEvents = async (req, res) => {
           status: e.status,
           organizerName: e.organizer?.name || "Unknown",
           organizerEmail: e.organizer?.email || "",
+          /* ticketsSold above counts Ticket DOCUMENTS (one per order).
+             availability mirrors the checkout guards on the event's own
+             tier counters — kept side by side, neither replaces the other. */
+          availability: computeAvailability(e),
         };
       }),
     );

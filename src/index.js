@@ -65,7 +65,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "paymethods-v2" }),
+  res.json({ ok: true, version: "availability-v1" }),
 );
 
 /* ================= ROUTES ================= */
