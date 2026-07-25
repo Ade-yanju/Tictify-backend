@@ -1,6 +1,7 @@
 // controllers/admin.analytics.controller.js
 import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
+import Payment from "../models/Payment.js";
 
 export const adminAnalytics = async (req, res) => {
   try {
@@ -55,11 +56,63 @@ export const adminAnalytics = async (req, res) => {
       { $sort: { _id: 1 } },
     ]);
 
+    /* Leaderboards the analytics page reads (e.event.title / e.sold /
+       e.revenue and o.organizer.name / o.sold / o.revenue). Built off
+       SUCCESS Payments and quantity-aware — a qty-3 order counts as 3 —
+       so they agree with the rest of the admin area. Previously these
+       keys were never returned, so both tables always rendered empty. */
+    const [topEvents, topOrganizers] = await Promise.all([
+      Payment.aggregate([
+        { $match: { status: "SUCCESS" } },
+        {
+          $group: {
+            _id: "$event",
+            revenue: { $sum: "$amount" },
+            sold: { $sum: { $ifNull: ["$quantity", 1] } },
+          },
+        },
+        { $sort: { revenue: -1 } },
+        { $limit: 5 },
+        {
+          $lookup: {
+            from: "events",
+            localField: "_id",
+            foreignField: "_id",
+            as: "event",
+          },
+        },
+        { $unwind: "$event" },
+      ]),
+      Payment.aggregate([
+        { $match: { status: "SUCCESS" } },
+        {
+          $group: {
+            _id: "$organizer",
+            revenue: { $sum: "$amount" },
+            sold: { $sum: { $ifNull: ["$quantity", 1] } },
+          },
+        },
+        { $sort: { revenue: -1 } },
+        { $limit: 5 },
+        {
+          $lookup: {
+            from: "users",
+            localField: "_id",
+            foreignField: "_id",
+            as: "organizer",
+          },
+        },
+        { $unwind: "$organizer" },
+      ]),
+    ]);
+
     res.json({
       revenueByMonth,
       ticketsByMonth,
       eventsByMonth,
       platformFeesByMonth, // ✅ NEW (non-breaking)
+      topEvents, // qty-aware, SUCCESS Payments
+      topOrganizers, // qty-aware, SUCCESS Payments
     });
   } catch (err) {
     console.error("ADMIN ANALYTICS ERROR:", err);

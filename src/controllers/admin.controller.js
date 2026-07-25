@@ -1,6 +1,7 @@
 import User from "../models/User.js";
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
+import Payment from "../models/Payment.js";
 import { computeAvailability } from "../utils/availability.js";
 import { findEventByIdOrSlug } from "../utils/resolveEvent.js";
 import { reconcileEventSold } from "../services/soldReconcile.service.js";
@@ -9,23 +10,52 @@ export const getAdminOrganizers = async (req, res) => {
   try {
     const organizers = await User.find({ role: "organizer" });
 
-    const data = await Promise.all(
-      organizers.map(async (org) => {
-        const events = await Event.countDocuments({ organizer: org._id });
-        const tickets = await Ticket.find({ organizer: org._id });
+    /* Money + counts are database truth, from SUCCESS Payments and
+       quantity-aware — a qty-3 order counts as 3 tickets, not 1. Two
+       aggregations feed the whole list instead of 2 queries per
+       organizer (the old Ticket.find undercounted every group order and
+       drew revenue from a per-document field). */
+    const [salesRows, eventRows] = await Promise.all([
+      Payment.aggregate([
+        { $match: { status: "SUCCESS" } },
+        {
+          $group: {
+            _id: "$organizer",
+            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+            organizerAmount: { $sum: "$organizerAmount" }, // owed to organizer
+            grossRevenue: { $sum: "$amount" }, // everything guests paid
+            platformFees: { $sum: "$platformFee" }, // Tictify's cut
+          },
+        },
+      ]),
+      Event.aggregate([
+        { $group: { _id: "$organizer", count: { $sum: 1 } } },
+      ]),
+    ]);
 
-        return {
-          _id: org._id,
-          name: org.name,
-          email: org.email,
-          events,
-          ticketsSold: tickets.length,
-          revenue: tickets.reduce((sum, t) => sum + (t.amountPaid || 0), 0),
-        };
-      }),
-    );
+    const salesByOrg = new Map(salesRows.map((r) => [String(r._id), r]));
+    const eventsByOrg = new Map(eventRows.map((r) => [String(r._id), r.count]));
 
-    // sort by revenue DESC
+    const data = organizers.map((org) => {
+      const s = salesByOrg.get(String(org._id)) || {};
+      const organizerAmount = s.organizerAmount || 0;
+      return {
+        _id: org._id,
+        name: org.name,
+        email: org.email,
+        events: eventsByOrg.get(String(org._id)) || 0,
+        ticketsSold: s.ticketsSold || 0,
+        /* `revenue` keeps its key for the UI but now means the organizer's
+           own take (organizerAmount); gross + fees exposed separately so
+           the two are never confused. */
+        revenue: organizerAmount,
+        organizerAmount,
+        grossRevenue: s.grossRevenue || 0,
+        platformFees: s.platformFees || 0,
+      };
+    });
+
+    // sort by the organizer's take DESC
     data.sort((a, b) => b.revenue - a.revenue);
 
     res.json(data);
@@ -40,12 +70,27 @@ export const getAdminEvents = async (req, res) => {
       .populate("organizer", "name email")
       .sort("-createdAt");
 
+    /* ONE aggregation for the whole page: quantity-aware sold per event
+       from SUCCESS Payments — the same authoritative source availability.js
+       and the reconcile sweep use. A qty-3 order counts as 3. This replaces
+       the old per-event Ticket.countDocuments, which counted Ticket
+       DOCUMENTS (one per order) and so undercounted every group order and
+       disagreed with availability.totalSold on the same row. */
+    const soldRows = await Payment.aggregate([
+      { $match: { status: "SUCCESS" } },
+      {
+        $group: {
+          _id: "$event",
+          ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+        },
+      },
+    ]);
+    const soldByEvent = new Map(
+      soldRows.map((r) => [String(r._id), r.ticketsSold]),
+    );
+
     const data = await Promise.all(
       events.map(async (e) => {
-        const ticketsSold = await Ticket.countDocuments({
-          event: e._id,
-        });
-
         /* Low-traffic admin page: recount against SUCCESS payments so
            the figures below are database truth, not a drifted counter.
            A recount failure degrades to the stored counters rather
@@ -53,6 +98,10 @@ export const getAdminEvents = async (req, res) => {
         await reconcileEventSold(e).catch((err) =>
           console.error("ADMIN RECONCILE:", err?.message || err),
         );
+
+        /* After the reconcile above, tier counters equal the SUCCESS
+           payment sums, so this equals computeAvailability(e).totalSold. */
+        const ticketsSold = soldByEvent.get(String(e._id)) || 0;
 
         return {
           _id: e._id,
@@ -64,9 +113,9 @@ export const getAdminEvents = async (req, res) => {
           status: e.status,
           organizerName: e.organizer?.name || "Unknown",
           organizerEmail: e.organizer?.email || "",
-          /* ticketsSold above counts Ticket DOCUMENTS (one per order).
-             availability mirrors the checkout guards on the event's own
-             tier counters — kept side by side, neither replaces the other. */
+          /* Quantity-aware sold above (SUCCESS Payments). availability
+             mirrors the checkout guards on the event's own tier counters;
+             both now derive from the same source and agree. */
           availability: computeAvailability(e),
         };
       }),
@@ -124,12 +173,16 @@ export const getAdminAnalytics = async (_, res) => {
     { $sort: { _id: 1 } },
   ]);
 
-  const topEvents = await Ticket.aggregate([
+  /* Quantity-aware, from SUCCESS Payments (money truth) — not one row
+     per Ticket document. Shape preserved: { event, sold, revenue } and
+     { organizer, sold, revenue }. */
+  const topEvents = await Payment.aggregate([
+    { $match: { status: "SUCCESS" } },
     {
       $group: {
         _id: "$event",
-        revenue: { $sum: "$amountPaid" },
-        sold: { $sum: 1 },
+        revenue: { $sum: "$amount" },
+        sold: { $sum: { $ifNull: ["$quantity", 1] } },
       },
     },
     { $sort: { revenue: -1 } },
@@ -145,12 +198,13 @@ export const getAdminAnalytics = async (_, res) => {
     { $unwind: "$event" },
   ]);
 
-  const topOrganizers = await Ticket.aggregate([
+  const topOrganizers = await Payment.aggregate([
+    { $match: { status: "SUCCESS" } },
     {
       $group: {
         _id: "$organizer",
-        revenue: { $sum: "$amountPaid" },
-        sold: { $sum: 1 },
+        revenue: { $sum: "$amount" },
+        sold: { $sum: { $ifNull: ["$quantity", 1] } },
       },
     },
     { $sort: { revenue: -1 } },

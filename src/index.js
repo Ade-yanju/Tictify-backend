@@ -66,7 +66,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "slugs-recount-v1" }),
+  res.json({ ok: true, version: "admin-per-event-v1" }),
 );
 
 /* ================= ROUTES ================= */
