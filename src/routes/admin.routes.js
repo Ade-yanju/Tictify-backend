@@ -18,6 +18,10 @@ import {
   getUnattributedSales,
   relinkSale,
 } from "../controllers/admin.repair.controller.js";
+import {
+  getBroadcastRecipients,
+  sendBroadcast,
+} from "../controllers/admin.broadcast.controller.js";
 
 const router = express.Router();
 
@@ -47,6 +51,10 @@ router.post(
   adminOnly,
   relinkSale,
 );
+
+/* ================= BROADCAST (email all organizers) ================= */
+router.get("/broadcast/recipients", authenticate, adminOnly, getBroadcastRecipients);
+router.post("/broadcast/send", authenticate, adminOnly, sendBroadcast);
 
 /* ================= AFFILIATES ================= */
 router.get("/affiliates", authenticate, adminOnly, getAdminAffiliates);
