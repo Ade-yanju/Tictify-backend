@@ -66,7 +66,7 @@ app.use(express.json());
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>
-  res.json({ ok: true, version: "orphan-sales-v1" }),
+  res.json({ ok: true, version: "relink-sales-v1" }),
 );
 
 /* ================= ROUTES ================= */

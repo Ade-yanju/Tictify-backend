@@ -14,6 +14,10 @@ import {
   toggleAdminAffiliate,
 } from "../controllers/admin.affiliates.controller.js";
 import { adminCancelEvent } from "../controllers/event.controller.js";
+import {
+  getUnattributedSales,
+  relinkSale,
+} from "../controllers/admin.repair.controller.js";
 
 const router = express.Router();
 
@@ -33,6 +37,16 @@ router.get("/events", authenticate, adminOnly, getAdminEvents);
 router.patch("/events/:id/cancel", authenticate, adminOnly, adminCancelEvent);
 /* Force an immediate Payment-derived recount of one event's tiers */
 router.post("/events/:id/recount", authenticate, adminOnly, adminRecountEvent);
+
+/* Repair sales that point at a stale event id (event still exists,
+   payment.event drifted) — relist + relink to the right live event */
+router.get("/unattributed-sales", authenticate, adminOnly, getUnattributedSales);
+router.post(
+  "/unattributed-sales/:paymentId/relink",
+  authenticate,
+  adminOnly,
+  relinkSale,
+);
 
 /* ================= AFFILIATES ================= */
 router.get("/affiliates", authenticate, adminOnly, getAdminAffiliates);
