@@ -53,6 +53,9 @@ export const adminDashboard = async (req, res) => {
             ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
             revenue: { $sum: "$amount" }, // gross — everything guests paid
             platformFees: { $sum: "$platformFee" }, // Tictify's cut
+            /* carried so orphaned sales (deleted event) stay attributed */
+            organizer: { $first: "$organizer" },
+            eventTitle: { $first: "$eventTitle" },
           },
         },
         {
@@ -63,11 +66,14 @@ export const adminDashboard = async (req, res) => {
             as: "event",
           },
         },
-        { $unwind: "$event" },
+        /* preserveNull: a sale whose event was DELETED must NOT be
+           dropped — otherwise the per-event rows no longer add up to the
+           revenue total. It stays as an "unknown/deleted event" row. */
+        { $unwind: { path: "$event", preserveNullAndEmptyArrays: true } },
         {
           $lookup: {
             from: "users",
-            localField: "event.organizer",
+            localField: "organizer", // the PAYMENT's organizer, survives deletion
             foreignField: "_id",
             as: "organizer",
           },
@@ -90,20 +96,25 @@ export const adminDashboard = async (req, res) => {
        exactly (event-level remaining, capped by both capacity and the
        tiers). capacity comes from the same computation. */
     const salesByEvent = (salesByEventRows || []).map((r) => {
-      const availability = computeAvailability(r.event);
-      const capacity =
-        availability.capacity != null ? availability.capacity : r.event.capacity ?? null;
+      /* r.event is null when the event was deleted after the sale.
+         Fall back to the title snapshotted on the payment so the row
+         is still named and the totals reconcile. */
+      const deleted = !r.event;
+      const availability = deleted ? null : computeAvailability(r.event);
+      const capacity = availability?.capacity ?? r.event?.capacity ?? null;
       const remaining =
-        availability.remaining != null
+        availability?.remaining != null
           ? availability.remaining
           : capacity != null
           ? Math.max(0, capacity - (r.ticketsSold || 0))
           : null;
       return {
-        _id: r.event._id,
-        title: r.event.title,
-        slug: r.event.slug || null,
-        status: r.event.status,
+        _id: r._id,
+        title:
+          r.event?.title ||
+          (r.eventTitle ? `${r.eventTitle} (deleted)` : "Deleted event"),
+        slug: r.event?.slug || null,
+        status: r.event?.status || "DELETED",
         organizerName: r.organizer?.name || "Unknown",
         ticketsSold: r.ticketsSold || 0,
         revenue: r.revenue || 0, // gross
@@ -115,7 +126,7 @@ export const adminDashboard = async (req, res) => {
 
     const recentSales = (recentPayments || []).map((p) => ({
       reference: p.reference,
-      eventTitle: p.event?.title || "Unknown event",
+      eventTitle: p.event?.title || p.eventTitle || "Deleted event",
       ticketType: p.ticketType || "",
       quantity: p.quantity || 1,
       amount: p.amount || 0,

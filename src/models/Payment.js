@@ -8,6 +8,15 @@ const paymentSchema = new mongoose.Schema(
       required: true,
     },
 
+    /* Snapshot of the event title at purchase time. The event ref can
+       be orphaned if an event is later deleted; this keeps every sale
+       attributable (and the admin per-event breakdown reconciling to
+       the revenue total) even then. */
+    eventTitle: {
+      type: String,
+      default: "",
+    },
+
     organizer: {
       type: mongoose.Schema.Types.ObjectId,
       ref: "User",

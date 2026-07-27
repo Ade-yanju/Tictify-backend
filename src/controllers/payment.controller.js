@@ -294,6 +294,7 @@ export async function createPaymentSession({
       await Payment.create({
         reference,
         event: eventId,
+        eventTitle: event.title,
         organizer: event.organizer,
         ticketType,
         email,
@@ -360,6 +361,7 @@ export async function createPaymentSession({
     await Payment.create({
       reference,
       event: eventId,
+      eventTitle: event.title,
       organizer: event.organizer, // ✅ always saved upfront
       ticketType,
       email,

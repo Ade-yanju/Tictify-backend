@@ -1,5 +1,6 @@
 import mongoose from "mongoose";
 import Event from "../models/Event.js";
+import Payment from "../models/Payment.js";
 import { computeAvailability } from "../utils/availability.js";
 import { buildEventSlug, findEventByIdOrSlug } from "../utils/resolveEvent.js";
 import { reconcileEventSold } from "../services/soldReconcile.service.js";
@@ -319,6 +320,21 @@ export const deleteEvent = async (req, res) => {
       return res
         .status(400)
         .json({ message: "Only ended events can be deleted" });
+    }
+
+    /* An event with real sales must NOT be deleted — doing so orphans
+       its payments (money made, guests holding tickets, but the sale
+       no longer attributable to any event) and breaks the admin
+       revenue reconciliation. The financial record has to be kept. */
+    const soldCount = await Payment.countDocuments({
+      event: event._id,
+      status: "SUCCESS",
+    });
+    if (soldCount > 0) {
+      return res.status(400).json({
+        message:
+          "This event has ticket sales and can't be deleted — its records must be kept for accounting. You can leave it ended.",
+      });
     }
 
     await event.deleteOne();
