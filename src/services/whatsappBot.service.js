@@ -4,7 +4,10 @@ import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import User from "../models/User.js";
 import Wallet from "../models/Wallet.js";
+import WalletTransaction from "../models/WalletTransaction.js";
 import Payment from "../models/Payment.js";
+import Withdrawal from "../models/Withdrawal.js";
+import DiscountCode from "../models/DiscountCode.js";
 import WhatsAppSession from "../models/WhatsAppSession.js";
 import { sendEmail } from "./email.service.js";
 import {
@@ -13,12 +16,15 @@ import {
   downloadWhatsAppMedia,
 } from "./whatsapp.service.js";
 import { decodeQrFromImage } from "./qrDecode.service.js";
+import cloudinary, { cloudinaryConfigured } from "../config/cloudinary.js";
 import {
   effectivePrice,
   createPaymentSession,
 } from "../controllers/payment.controller.js";
+import { transferFee } from "./paystack.service.js";
 import { resolveDiscount } from "../controllers/discount.controller.js";
 import { performScan, transferTicket } from "../controllers/ticket.controller.js";
+import { buildEventSlug } from "../utils/resolveEvent.js";
 
 /* =====================================================
    WHATSAPP BOT — THE BRAIN
@@ -37,6 +43,30 @@ const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const REF_RE = /\bref[ :]+([A-Za-z0-9-]{2,30})\b/i;
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
+const MIN_WITHDRAWAL = 500;
+const MAX_WITHDRAWAL = 5_000_000;
+const BANKS = [
+  { code: "044", name: "Access Bank" },
+  { code: "023", name: "Citibank Nigeria" },
+  { code: "050", name: "Ecobank Nigeria" },
+  { code: "070", name: "Fidelity Bank" },
+  { code: "011", name: "First Bank of Nigeria" },
+  { code: "214", name: "First City Monument Bank" },
+  { code: "058", name: "Guaranty Trust Bank" },
+  { code: "030", name: "Heritage Bank" },
+  { code: "082", name: "Keystone Bank" },
+  { code: "076", name: "Polaris Bank" },
+  { code: "101", name: "Providus Bank" },
+  { code: "221", name: "Stanbic IBTC Bank" },
+  { code: "068", name: "Standard Chartered Bank" },
+  { code: "232", name: "Sterling Bank" },
+  { code: "100", name: "SunTrust Bank" },
+  { code: "032", name: "Union Bank of Nigeria" },
+  { code: "033", name: "United Bank For Africa" },
+  { code: "215", name: "Unity Bank" },
+  { code: "035", name: "Wema Bank" },
+  { code: "057", name: "Zenith Bank" },
+];
 
 /* category options come straight from the Event schema enum */
 const EVENT_CATEGORIES = Event.schema.path("category").enumValues;
@@ -153,10 +183,11 @@ async function showMainMenu(t, phone, session) {
 
 const ORG_MENU_ROWS = [
   { id: "1", title: "📊 Balance & stats", description: "Wallet, earnings, tickets sold" },
-  { id: "2", title: "💸 Withdraw", description: "OTP-protected payout to your bank" },
-  { id: "3", title: "🔓 Unlink this number", description: "Disconnect this WhatsApp" },
+  { id: "2", title: "📅 My events", description: "Publish, end, edit, discounts" },
+  { id: "3", title: "💸 Withdraw", description: "OTP-protected payout to your bank" },
   { id: "4", title: "➕ Create event", description: "Set up a new event from chat" },
   { id: "5", title: "🎫 Scan tickets", description: "Admit guests at the gate" },
+  { id: "6", title: "🔓 Unlink this number", description: "Disconnect this WhatsApp" },
 ];
 
 const AFF_MENU_ROWS = [
@@ -250,9 +281,12 @@ export async function handleIncoming(phone, message, transport) {
       if (session.state === "SCAN" && session.organizerUser) {
         return await handleScanImage(session, message.imageId, t, phone);
       }
+      if (session.state === "EV_BANNER" && session.organizerUser) {
+        return await handleEvBannerImage(session, message.imageId, t, phone);
+      }
       return t.send(
         phone,
-        `📷 Nice photo! If you're scanning guest tickets, open *Organizer zone* → *Scan tickets* first.\n\nType *menu* to get started.`,
+        `📷 Nice photo! If you're scanning tickets or adding an event banner, open the right Organizer zone flow first.\n\nType *menu* to get started.`,
       );
     }
 
@@ -269,6 +303,10 @@ export async function handleIncoming(phone, message, transport) {
       (session.state === "ORG_MENU" ||
         session.state === "SCAN_PICK" ||
         session.state === "SCAN" ||
+        session.state.startsWith("ORG_EVENTS") ||
+        session.state.startsWith("ORG_EVENT") ||
+        session.state.startsWith("ORG_DISC") ||
+        session.state.startsWith("WD_") ||
         session.state.startsWith("EV_")) &&
       !session.organizerUser
     ) {
@@ -315,6 +353,30 @@ export async function handleIncoming(phone, message, transport) {
         return await handleOrgOtp(session, input, t, phone);
       case "ORG_MENU":
         return await handleOrgMenu(session, input, t, phone);
+      case "ORG_EVENTS":
+        return await handleOrgEvents(session, input, t, phone);
+      case "ORG_EVENT_ACTION":
+        return await handleOrgEventAction(session, input, t, phone);
+      case "ORG_EVENT_EDIT":
+        return await handleOrgEventEdit(session, input, t, phone);
+      case "ORG_EVENT_EDIT_VALUE":
+        return await handleOrgEventEditValue(session, input, t, phone);
+      case "ORG_DISC_CODE":
+        return await handleOrgDiscCode(session, input, t, phone);
+      case "ORG_DISC_PERCENT":
+        return await handleOrgDiscPercent(session, input, t, phone);
+      case "ORG_DISC_USES":
+        return await handleOrgDiscUses(session, input, t, phone);
+      case "WD_AMOUNT":
+        return await handleWdAmount(session, input, t, phone);
+      case "WD_BANK":
+        return await handleWdBank(session, input, t, phone);
+      case "WD_ACCOUNT":
+        return await handleWdAccount(session, input, t, phone);
+      case "WD_NAME":
+        return await handleWdName(session, input, t, phone);
+      case "WD_OTP":
+        return await handleWdOtp(session, input, t, phone);
       case "AFF_EMAIL":
         return await handleAffEmail(session, input, t, phone);
       case "AFF_OTP":
@@ -341,6 +403,8 @@ export async function handleIncoming(phone, message, transport) {
         return await handleEvPrice(session, input, t, phone);
       case "EV_QTY":
         return await handleEvQty(session, input, t, phone);
+      case "EV_BANNER":
+        return await handleEvBanner(session, input, t, phone);
       case "EV_CONFIRM":
         return await handleEvConfirm(session, input, t, phone);
       case "MENU":
@@ -1044,12 +1108,16 @@ async function handleOrgMenu(session, input, t, phone) {
     }
 
     case "2":
-      return t.send(
-        phone,
-        `💸 *Withdrawals*\n\nFor your security, withdrawals happen on the Tictify dashboard and are protected by a *6-digit email code* — no money moves without it.\n\n👉 ${frontendUrl()}/organizer/withdraw`,
-      );
+      return showOrganizerEvents(session, t, phone);
 
     case "3":
+      await setSession(session, "WD_AMOUNT", {});
+      return t.send(
+        phone,
+        `💸 *Withdraw funds*\n\nHow much do you want to withdraw? Minimum ${fmtNaira(MIN_WITHDRAWAL)}.\n\nSend the amount as a number, e.g. 25000.`,
+      );
+
+    case "6":
       session.organizerUser = undefined;
       await setSession(session, "MENU", {});
       return t.send(
@@ -1102,6 +1170,435 @@ async function handleOrgMenu(session, input, t, phone) {
     default:
       return showOrgMenu(t, phone);
   }
+}
+
+async function showOrganizerEvents(session, t, phone, prefix = "") {
+  const events = await Event.find({ organizer: session.organizerUser })
+    .sort("-createdAt")
+    .limit(10)
+    .lean();
+
+  if (!events.length) {
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `${prefix}You do not have events yet.\n\n`);
+  }
+
+  await setSession(session, "ORG_EVENTS", {
+    orgEventIds: events.map((event) => String(event._id)),
+  });
+  return uiList(
+    t,
+    phone,
+    `${prefix}📅 *My events*\n\nPick an event to manage.`,
+    "Events",
+    events.map((event, i) => ({
+      id: String(i + 1),
+      title: String(event.title || "Untitled").slice(0, 24),
+      description: `${event.status} · ${fmtDate(event.date)}`.slice(0, 72),
+    })),
+  );
+}
+
+async function loadOwnedOrgEvent(session) {
+  const eventId = session.data?.orgEventId;
+  if (!eventId) return null;
+  return Event.findOne({
+    _id: eventId,
+    organizer: session.organizerUser,
+  });
+}
+
+async function handleOrgEvents(session, input, t, phone) {
+  const ids = Array.isArray(session.data?.orgEventIds) ? session.data.orgEventIds : [];
+  const idx = parseInt(input, 10);
+  if (!Number.isInteger(idx) || idx < 1 || idx > ids.length) {
+    return t.send(phone, `Please reply with an event number (1-${ids.length || 1}), or type *menu*.`);
+  }
+
+  const event = await Event.findOne({
+    _id: ids[idx - 1],
+    organizer: session.organizerUser,
+  }).lean();
+  if (!event) return showOrganizerEvents(session, t, phone, `😕 Event not found.\n\n`);
+
+  await setSession(session, "ORG_EVENT_ACTION", {
+    orgEventId: String(event._id),
+    orgEventTitle: event.title,
+  });
+
+  const sold = (event.ticketTypes || []).reduce((sum, tier) => sum + (tier.sold || 0), 0);
+  return uiList(
+    t,
+    phone,
+    `📅 *${event.title}*\n` +
+      `Status: ${event.status}\n` +
+      `Date: ${fmtDate(event.date)}\n` +
+      `Tickets sold: ${sold}/${event.capacity}\n\n` +
+      `What do you want to do?`,
+    "Actions",
+    [
+      { id: "1", title: "Publish / make live" },
+      { id: "2", title: "End event" },
+      { id: "3", title: "Edit basics" },
+      { id: "4", title: "Add discount code" },
+      { id: "5", title: "View discount codes" },
+      { id: "6", title: "Sales summary" },
+    ],
+  );
+}
+
+async function handleOrgEventAction(session, input, t, phone) {
+  const event = await loadOwnedOrgEvent(session);
+  if (!event) return showOrganizerEvents(session, t, phone, `😕 Event not found.\n\n`);
+
+  switch (input) {
+    case "1":
+      if (new Date(event.endDate) <= new Date()) {
+        event.status = "ENDED";
+        await event.save();
+        return showOrganizerEvents(session, t, phone, `⌛ This event has ended, so it cannot be published.\n\n`);
+      }
+      event.status = "LIVE";
+      await event.save();
+      return showOrganizerEvents(session, t, phone, `✅ *${event.title}* is now LIVE.\n\n`);
+
+    case "2":
+      event.status = "ENDED";
+      await event.save();
+      return showOrganizerEvents(session, t, phone, `🏁 *${event.title}* has been ended.\n\n`);
+
+    case "3":
+      await setSession(session, "ORG_EVENT_EDIT", session.data);
+      return uiList(t, phone, `✏️ What do you want to edit?`, "Fields", [
+        { id: "title", title: "Title" },
+        { id: "description", title: "Description" },
+        { id: "location", title: "Venue/location" },
+        { id: "city", title: "City" },
+        { id: "capacity", title: "Capacity" },
+        { id: "affiliate", title: "Affiliate settings" },
+      ]);
+
+    case "4":
+      await setSession(session, "ORG_DISC_CODE", session.data);
+      return t.send(phone, `🏷️ Send the discount code, e.g. EARLY20.`);
+
+    case "5": {
+      const codes = await DiscountCode.find({ event: event._id }).sort("-createdAt").lean();
+      const body = codes.length
+        ? codes
+            .map((code) => `${code.active ? "✅" : "⏸️"} *${code.code}* — ${code.percentOff}% off, ${code.uses}/${code.maxUses} used`)
+            .join("\n")
+        : "No discount codes yet.";
+      return uiButtons(t, phone, `🏷️ *Discount codes*\n\n${body}`, [
+        { id: "4", title: "➕ Add code" },
+      ]);
+    }
+
+    case "6": {
+      const sales = await Payment.aggregate([
+        { $match: { event: event._id, status: "SUCCESS" } },
+        {
+          $group: {
+            _id: null,
+            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+            revenue: { $sum: "$organizerAmount" },
+          },
+        },
+      ]);
+      return t.send(
+        phone,
+        `📊 *Sales — ${event.title}*\n\n` +
+          `🎫 Tickets sold: ${sales[0]?.ticketsSold || 0}\n` +
+          `🧾 Revenue: ${fmtNaira(sales[0]?.revenue || 0)}\n\n` +
+          `Type *menu* or go back through Organizer zone.`,
+      );
+    }
+
+    default:
+      return t.send(phone, `Please pick an action from the list, or type *menu*.`);
+  }
+}
+
+async function handleOrgEventEdit(session, input, t, phone) {
+  if (!["title", "description", "location", "city", "capacity", "affiliate"].includes(input)) {
+    return t.send(phone, `Please pick one of the listed fields, or type *menu*.`);
+  }
+  await setSession(session, "ORG_EVENT_EDIT_VALUE", {
+    ...session.data,
+    editField: input,
+  });
+  if (input === "affiliate") {
+    return t.send(phone, `Send affiliate setting as: on 15\n\nUse off to disable, or on plus commission percent 1-50.`);
+  }
+  return t.send(phone, `Send the new ${input}.`);
+}
+
+async function handleOrgEventEditValue(session, input, t, phone) {
+  const event = await loadOwnedOrgEvent(session);
+  if (!event) return showOrganizerEvents(session, t, phone, `😕 Event not found.\n\n`);
+  if (["ENDED", "CANCELLED"].includes(event.status)) {
+    return showOrganizerEvents(session, t, phone, `A ${event.status.toLowerCase()} event cannot be edited.\n\n`);
+  }
+
+  const field = session.data?.editField;
+  if (field === "capacity") {
+    const capacity = parseInt(input.replace(/[,\s]/g, ""), 10);
+    const totalSold = event.ticketTypes.reduce((sum, tier) => sum + (tier.sold || 0), 0);
+    if (!Number.isInteger(capacity) || capacity < Math.max(1, totalSold)) {
+      return t.send(phone, `Capacity must be a number and cannot be below tickets already sold (${totalSold}).`);
+    }
+    event.capacity = capacity;
+  } else if (field === "affiliate") {
+    const lower = input.toLowerCase();
+    if (lower === "off") {
+      event.affiliatesEnabled = false;
+    } else {
+      const match = lower.match(/^on\s+(\d{1,2})$/);
+      if (!match) return t.send(phone, `Send *off* or *on 15* where 15 is the commission percent.`);
+      event.affiliatesEnabled = true;
+      event.affiliatePercent = Math.min(50, Math.max(1, parseInt(match[1], 10)));
+    }
+  } else if (["title", "description", "location", "city"].includes(field)) {
+    if (input.trim().length < 2) return t.send(phone, `Please send at least 2 characters.`);
+    event[field] = input.trim().slice(0, field === "description" ? 1000 : 160);
+  }
+
+  await event.save();
+  return showOrganizerEvents(session, t, phone, `✅ Event updated.\n\n`);
+}
+
+async function handleOrgDiscCode(session, input, t, phone) {
+  const code = input.trim().toUpperCase();
+  if (!/^[A-Z0-9_-]{2,20}$/.test(code)) {
+    return t.send(phone, `Code must be 2-20 letters, numbers, dashes or underscores.`);
+  }
+  await setSession(session, "ORG_DISC_PERCENT", { ...session.data, discountCode: code });
+  return t.send(phone, `What percent off? Send a number from 1 to 90.`);
+}
+
+async function handleOrgDiscPercent(session, input, t, phone) {
+  const percent = parseInt(input, 10);
+  if (!Number.isInteger(percent) || percent < 1 || percent > 90) {
+    return t.send(phone, `Percent off must be a whole number from 1 to 90.`);
+  }
+  await setSession(session, "ORG_DISC_USES", { ...session.data, percentOff: percent });
+  return t.send(phone, `Maximum uses? Send a number, e.g. 100.`);
+}
+
+async function handleOrgDiscUses(session, input, t, phone) {
+  const event = await loadOwnedOrgEvent(session);
+  if (!event) return showOrganizerEvents(session, t, phone, `😕 Event not found.\n\n`);
+  const maxUses = Math.min(10000, Math.max(1, parseInt(input, 10) || 100));
+  try {
+    await DiscountCode.create({
+      event: event._id,
+      organizer: session.organizerUser,
+      code: session.data.discountCode,
+      percentOff: session.data.percentOff,
+      maxUses,
+    });
+  } catch (err) {
+    if (err.code === 11000) {
+      await setSession(session, "ORG_DISC_CODE", session.data);
+      return t.send(phone, `That code already exists for this event. Send another code.`);
+    }
+    throw err;
+  }
+  return showOrganizerEvents(session, t, phone, `✅ Discount *${session.data.discountCode}* created.\n\n`);
+}
+
+async function handleWdAmount(session, input, t, phone) {
+  const amount = Number(input.replace(/[₦,\s]/g, ""));
+  if (!Number.isFinite(amount) || !Number.isInteger(amount)) {
+    return t.send(phone, `Please send a whole amount, e.g. 25000.`);
+  }
+  if (amount < MIN_WITHDRAWAL || amount > MAX_WITHDRAWAL) {
+    return t.send(phone, `Withdrawal must be between ${fmtNaira(MIN_WITHDRAWAL)} and ${fmtNaira(MAX_WITHDRAWAL)}.`);
+  }
+  const wallet = await Wallet.findOne({ organizer: session.organizerUser }).lean();
+  if (!wallet || wallet.balance < amount) {
+    return showOrgMenu(
+      t,
+      phone,
+      `Insufficient wallet balance. Available: ${fmtNaira(wallet?.balance || 0)}\n\n`,
+    );
+  }
+  await setSession(session, "WD_BANK", { amount });
+  return uiList(
+    t,
+    phone,
+    `🏦 Pick the receiving bank.`,
+    "Banks",
+    BANKS.map((bank, i) => ({
+      id: String(i + 1),
+      title: bank.name.slice(0, 24),
+      description: `Code ${bank.code}`,
+    })),
+  );
+}
+
+async function handleWdBank(session, input, t, phone) {
+  const idx = parseInt(input, 10);
+  if (!Number.isInteger(idx) || idx < 1 || idx > BANKS.length) {
+    return t.send(phone, `Please reply with a bank number from the list (1-${BANKS.length}).`);
+  }
+  await setSession(session, "WD_ACCOUNT", {
+    ...session.data,
+    bank: BANKS[idx - 1],
+  });
+  return t.send(phone, `Send the *10-digit account number*.`);
+}
+
+async function handleWdAccount(session, input, t, phone) {
+  const accountNumber = input.replace(/\D/g, "");
+  if (!/^\d{10}$/.test(accountNumber)) {
+    return t.send(phone, `Account number must be exactly 10 digits.`);
+  }
+  await setSession(session, "WD_NAME", { ...session.data, accountNumber });
+  return t.send(phone, `Send the *account name* exactly as it should appear.`);
+}
+
+async function handleWdName(session, input, t, phone) {
+  const accountName = input.trim();
+  if (accountName.length < 3) {
+    return t.send(phone, `Account name is required.`);
+  }
+
+  const userId = session.organizerUser;
+  const amount = Number(session.data?.amount || 0);
+  const bank = session.data?.bank;
+  const wallet = await Wallet.findOne({ organizer: userId });
+  if (!wallet || wallet.balance < amount) {
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `Insufficient wallet balance. Available: ${fmtNaira(wallet?.balance || 0)}\n\n`);
+  }
+
+  const pending = await Withdrawal.findOne({ organizer: userId, status: "PENDING" });
+  if (pending) {
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `You already have a pending withdrawal. Wait for it to be processed.\n\n`);
+  }
+
+  await Withdrawal.updateMany(
+    { organizer: userId, status: "AWAITING_OTP" },
+    { status: "EXPIRED" },
+  );
+
+  const fee = transferFee(amount);
+  const netAmount = amount - fee;
+  const otp = String(crypto.randomInt(100000, 1000000));
+  const withdrawal = await Withdrawal.create({
+    organizer: userId,
+    amount,
+    transferFee: fee,
+    netAmount,
+    bankDetails: {
+      bankName: bank.name,
+      bankCode: bank.code,
+      accountNumber: session.data.accountNumber,
+      accountName,
+    },
+    status: "AWAITING_OTP",
+    otpHash: sha256(otp),
+    otpExpires: new Date(Date.now() + OTP_TTL_MS),
+    otpAttempts: 0,
+  });
+
+  const user = await User.findById(userId).select("email name").lean();
+  sendEmail({
+    to: user.email,
+    subject: `Confirm your withdrawal — code ${otp}`,
+    html: `
+      <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;background:#f9fafb;border-radius:16px;">
+        <h2 style="color:#1a1a1a;margin-top:0;">Confirm your withdrawal</h2>
+        <p style="color:#555;line-height:1.7;">Reply in WhatsApp with this code to confirm your payout.</p>
+        <div style="background:#fff;padding:18px 22px;border-radius:12px;border-left:4px solid #E8C96A;margin:16px 0;">
+          <p style="margin:4px 0;"><strong>You receive:</strong> ₦${netAmount.toLocaleString()}</p>
+          <p style="margin:4px 0;"><strong>To:</strong> ${bank.name} ····${session.data.accountNumber.slice(-4)} (${accountName})</p>
+        </div>
+        <div style="text-align:center;background:#fff;padding:18px;border-radius:12px;margin:16px 0;">
+          <p style="margin:0 0 6px;color:#888;font-size:12px;">YOUR CONFIRMATION CODE</p>
+          <p style="margin:0;font-size:32px;font-weight:800;letter-spacing:8px;color:#1a1a1a;">${otp}</p>
+        </div>
+      </div>
+    `,
+  }).catch((err) => console.error("WA withdrawal OTP email failed:", err.message));
+
+  await setSession(session, "WD_OTP", {
+    withdrawalId: String(withdrawal._id),
+    amount,
+    netAmount,
+  });
+  const masked = user.email.replace(/^(..).*(@.*)$/, "$1•••$2");
+  return t.send(
+    phone,
+    `🔐 We sent a 6-digit confirmation code to ${masked}.\n\n` +
+      `Reply with it here to request ${fmtNaira(netAmount)} to ${bank.name} ····${session.data.accountNumber.slice(-4)}.`,
+  );
+}
+
+async function handleWdOtp(session, input, t, phone) {
+  if (!/^\d{6}$/.test(input)) {
+    return t.send(phone, `Enter the 6-digit code from your email, or type *menu* to cancel.`);
+  }
+  const withdrawal = await Withdrawal.findOne({
+    _id: session.data?.withdrawalId,
+    organizer: session.organizerUser,
+    status: "AWAITING_OTP",
+  });
+  if (!withdrawal) {
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `No withdrawal is awaiting confirmation.\n\n`);
+  }
+  if (withdrawal.otpExpires < new Date()) {
+    withdrawal.status = "EXPIRED";
+    await withdrawal.save();
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `Code expired. Start the withdrawal again.\n\n`);
+  }
+  if (withdrawal.otpAttempts >= OTP_MAX_ATTEMPTS) {
+    withdrawal.status = "EXPIRED";
+    await withdrawal.save();
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `Too many wrong attempts. Start the withdrawal again.\n\n`);
+  }
+  if (sha256(input) !== withdrawal.otpHash) {
+    withdrawal.otpAttempts += 1;
+    await withdrawal.save();
+    return t.send(phone, `Wrong code — ${OTP_MAX_ATTEMPTS - withdrawal.otpAttempts} attempts left.`);
+  }
+
+  const wallet = await Wallet.findOneAndUpdate(
+    { organizer: session.organizerUser, balance: { $gte: withdrawal.amount } },
+    { $inc: { balance: -withdrawal.amount } },
+    { new: true },
+  );
+  if (!wallet) {
+    withdrawal.status = "EXPIRED";
+    await withdrawal.save();
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `Insufficient balance — the request was cancelled.\n\n`);
+  }
+
+  withdrawal.status = "PENDING";
+  withdrawal.otpHash = undefined;
+  withdrawal.otpExpires = undefined;
+  await withdrawal.save();
+
+  await WalletTransaction.create({
+    organizer: session.organizerUser,
+    type: "DEBIT",
+    amount: withdrawal.amount,
+    reference: `WD-HOLD-${withdrawal._id}`,
+    description: `Withdrawal — ₦${withdrawal.netAmount.toLocaleString()} to ${withdrawal.bankDetails.bankName} ····${withdrawal.bankDetails.accountNumber.slice(-4)} (₦${withdrawal.transferFee} bank transfer fee)`,
+  });
+
+  await setSession(session, "ORG_MENU", {});
+  return showOrgMenu(
+    t,
+    phone,
+    `✅ Withdrawal confirmed. You will receive ${fmtNaira(withdrawal.netAmount)} once processed.\n\n`,
+  );
 }
 
 /* ================= GATE SCANNER ================= */
@@ -1520,23 +2017,74 @@ async function handleEvQty(session, input, t, phone) {
   }
 
   const d = { ...session.data, evQty: qty };
-  await setSession(session, "EV_CONFIRM", d);
-
+  await setSession(session, "EV_BANNER", d);
   return uiButtons(
     t,
     phone,
+    `🖼️ Send the event *banner/flyer image* now, or skip and use the Tictify placeholder.`,
+    [{ id: "skip", title: "Skip for now" }],
+  );
+}
+
+function confirmEventPrompt(d) {
+  return uiButtons(
+    d.t,
+    d.phone,
     `📋 *Confirm your event*\n\n` +
       `*${d.evTitle}*\n` +
       `📅 ${fmtDate(new Date(d.evDate))} — starts 6:00 PM (adjust exact times on the website)\n` +
       `📍 ${d.evLocation}, ${d.evCity}\n` +
       `🎭 ${d.evCategory}\n` +
-      `🎟️ ${d.evTicketName} — ${d.evPrice === 0 ? "Free" : fmtNaira(d.evPrice)} × ${qty} (capacity ${qty})\n\n` +
-      `📌 It will be saved as a *DRAFT*. Banner upload and multi-tier tickets are managed on the website — add them there, then hit Publish.`,
+      `🎟️ ${d.evTicketName} — ${d.evPrice === 0 ? "Free" : fmtNaira(d.evPrice)} × ${d.evQty} (capacity ${d.evQty})\n` +
+      `🖼️ Banner: ${d.evBanner ? "uploaded" : "placeholder"}\n\n` +
+      `📌 It will be saved as a *DRAFT*. You can publish it from this bot after creation.`,
     [
       { id: "1", title: "✅ Create" },
       { id: "2", title: "❌ Cancel" },
     ],
   );
+}
+
+async function uploadBannerBuffer(buffer) {
+  if (!cloudinaryConfigured) return null;
+  const result = await new Promise((resolve, reject) => {
+    const stream = cloudinary.uploader.upload_stream(
+      { folder: "tictify/banners", resource_type: "image" },
+      (err, out) => (err ? reject(err) : resolve(out)),
+    );
+    stream.end(buffer);
+  });
+  return result.secure_url;
+}
+
+async function handleEvBanner(session, input, t, phone) {
+  if (!["skip", "no", "none"].includes(input.toLowerCase())) {
+    return t.send(phone, `Please send a banner image, tap *Skip for now*, or type *menu*.`);
+  }
+  await setSession(session, "EV_CONFIRM", {
+    ...session.data,
+    evBanner: `${frontendUrl()}/logo.png`,
+  });
+  return confirmEventPrompt({ ...session.data, evBanner: `${frontendUrl()}/logo.png`, t, phone });
+}
+
+async function handleEvBannerImage(session, imageId, t, phone) {
+  const download = t.downloadMedia || downloadWhatsAppMedia;
+  const buffer = await download(imageId);
+  if (!buffer || !buffer.length) {
+    return t.send(phone, `I couldn't download that image. Please send it again, or type *skip*.`);
+  }
+  let url = null;
+  try {
+    url = await uploadBannerBuffer(buffer);
+  } catch (err) {
+    console.error("WA BANNER UPLOAD ERROR:", err.message);
+  }
+  if (!url) {
+    return t.send(phone, `Image uploads are not configured right now. Type *skip* to continue with the placeholder.`);
+  }
+  await setSession(session, "EV_CONFIRM", { ...session.data, evBanner: url });
+  return confirmEventPrompt({ ...session.data, evBanner: url, t, phone });
 }
 
 async function handleEvConfirm(session, input, t, phone) {
@@ -1562,8 +2110,11 @@ async function handleEvConfirm(session, input, t, phone) {
   /* Mirrors the web createEvent controller: status defaults to DRAFT,
      ticketTypes carry sold:0, category defaults to "Other", city
      trimmed, bannerFit "cover", affiliates off, percent 15. Banner is
-     a placeholder until they upload a real one on the website. */
+     a placeholder when the organizer skipped the WhatsApp banner upload. */
+  const eventId = new mongoose.Types.ObjectId();
   const event = await Event.create({
+    _id: eventId,
+    slug: buildEventSlug(d.evTitle, eventId),
     organizer: session.organizerUser,
     title: d.evTitle,
     description: `${d.evTitle} — full details coming soon.`,
@@ -1575,7 +2126,7 @@ async function handleEvConfirm(session, input, t, phone) {
       { name: d.evTicketName, price: d.evPrice, quantity: d.evQty, sold: 0 },
     ],
     status: "DRAFT",
-    banner: `${frontendUrl()}/logo.png`,
+    banner: d.evBanner || `${frontendUrl()}/logo.png`,
     category: d.evCategory || "Other",
     city: String(d.evCity || "").trim(),
     bannerFit: "cover",
@@ -1589,10 +2140,8 @@ async function handleEvConfirm(session, input, t, phone) {
     `🎉 *Event created!*\n\n` +
       `*${event.title}* is saved as a *DRAFT*.\n\n` +
       `👉 ${frontendUrl()}/events/${event._id}\n\n` +
-      `To start selling:\n` +
-      `1. Log in at ${frontendUrl()} → *My Events*\n` +
-      `2. Add your banner image (and extra ticket tiers if you need them)\n` +
-      `3. Hit *Publish*\n\n` +
+      `To start selling, open *Organizer zone* → *My events* → choose this event → *Publish*.\n\n` +
+      `You can still use the website later for advanced edits like extra ticket tiers and exact start/end times.\n\n` +
       `Type *menu* anytime.`,
   );
 }

@@ -2,7 +2,7 @@ import express from "express";
 import crypto from "crypto";
 import bcrypt from "bcryptjs";
 import rateLimit from "express-rate-limit";
-import { authenticate, authorize } from "../middlewares/auth.middleware.js";
+import { authenticate } from "../middlewares/auth.middleware.js";
 import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Wallet from "../models/Wallet.js";
@@ -24,6 +24,14 @@ const joinLimiter = rateLimit({
   legacyHeaders: false,
 });
 
+function canUseAffiliateDashboard(req, res, next) {
+  if (!req.user) {
+    return res.status(401).json({ message: "Authentication required" });
+  }
+  if (req.user.role === "affiliate" || req.user.affiliateCode) return next();
+  return res.status(403).json({ message: "Affiliate access required" });
+}
+
 /* ── JOIN: collect details, take the ₦1,000 fee via Paystack.
    The account is only created after payment succeeds. ── */
 router.post("/join", joinLimiter, async (req, res) => {
@@ -37,13 +45,28 @@ router.post("/join", joinLimiter, async (req, res) => {
       return res.status(400).json({ message: "A valid email is required" });
     if (password.length < 8)
       return res.status(400).json({ message: "Password must be at least 8 characters" });
-    if (await User.findOne({ email }))
-      return res.status(409).json({ message: "Email already registered — just log in" });
     if (!PAYSTACK_KEY || !PAYSTACK_KEY.startsWith("sk_"))
       return res.status(503).json({ message: "Payments are not configured yet" });
 
+    const existingUser = await User.findOne({ email });
+    if (existingUser) {
+      if (existingUser.affiliateCode) {
+        return res.status(409).json({
+          message: "This email is already an affiliate — log in to your dashboard",
+        });
+      }
+      const passwordOk = await bcrypt.compare(password, existingUser.passwordHash);
+      if (!passwordOk) {
+        return res.status(401).json({
+          message: "Email already registered — enter that account password to add affiliate access",
+        });
+      }
+    }
+
     const reference = `AFFJOIN-${crypto.randomBytes(10).toString("hex")}`;
-    const passwordHash = await bcrypt.hash(password, 12);
+    const passwordHash = existingUser
+      ? existingUser.passwordHash
+      : await bcrypt.hash(password, 12);
 
     /* one pending signup per email — retrying overwrites it */
     await AffiliateSignup.findOneAndUpdate(
@@ -98,12 +121,17 @@ router.get("/join/callback", async (req, res) => {
       v.status && v.data?.status === "success" && v.data.amount >= JOIN_FEE * 100;
     if (!paid) return res.redirect(`${FRONTEND}/affiliate?payment=failed`);
 
-    /* atomic: only the first callback creates the account */
-    const signup = await AffiliateSignup.findOneAndUpdate(
+    /* Idempotent: a provider/browser retry may hit after status is
+       already PAID. Still finish user creation if that earlier callback
+       stopped midway. */
+    let signup = await AffiliateSignup.findOneAndUpdate(
       { reference, status: "PENDING" },
       { status: "PAID" },
       { new: true },
     );
+    if (!signup) {
+      signup = await AffiliateSignup.findOne({ reference, status: "PAID" });
+    }
     if (!signup) return res.redirect(`${FRONTEND}/login?welcome=affiliate`);
 
     const prefix =
@@ -159,7 +187,7 @@ router.get("/join/callback", async (req, res) => {
 });
 
 /* Affiliate dashboard: code, balance, sales totals */
-router.get("/me", authenticate, authorize("affiliate"), async (req, res) => {
+router.get("/me", authenticate, canUseAffiliateDashboard, async (req, res) => {
   try {
     /* Self-heal: an affiliate without a promo code would show a blank
        code AND platform-wide stats (promoter:null matches every
@@ -201,7 +229,7 @@ router.get("/me", authenticate, authorize("affiliate"), async (req, res) => {
 });
 
 /* Events open to affiliates — what they can promote right now */
-router.get("/events", authenticate, authorize("affiliate"), async (req, res) => {
+router.get("/events", authenticate, canUseAffiliateDashboard, async (req, res) => {
   try {
     const events = await Event.find({
       status: "LIVE",

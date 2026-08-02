@@ -72,6 +72,7 @@ export const authenticate = async (req, res, next) => {
       role: user.role,
       name: user.name,
       email: user.email,
+      affiliateCode: user.affiliateCode,
     };
 
     next();
@@ -124,6 +125,7 @@ export const optionalAuth = async (req, res, next) => {
         role: user.role,
         name: user.name,
         email: user.email,
+        affiliateCode: user.affiliateCode,
       };
     }
 

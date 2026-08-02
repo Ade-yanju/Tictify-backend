@@ -32,7 +32,6 @@ export async function creditAmbassadorCommission(payment) {
     if (payment.promoter && Number(payment.organizerAmount) > 0) {
       const affiliate = await User.findOne({
         affiliateCode: payment.promoter,
-        role: "affiliate",
         isActive: true,
       });
       if (affiliate) {

@@ -4,7 +4,8 @@
   "type": "module",
   "scripts": {
     "dev": "nodemon src/index.js",
-    "test": "node --test test/*.test.mjs"
+    "test": "node --test test/*.test.mjs",
+    "repair:affiliates": "node src/scripts/repairAffiliateSignups.js"
   },
   "keywords": [],
   "author": "",
