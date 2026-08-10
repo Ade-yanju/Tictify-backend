@@ -197,7 +197,8 @@ function menuBody(promoter) {
   return (
     (promoter ? `🎁 Shopping via promo code *${promoter}*\n\n` : "") +
     `🎟️ *Welcome to Tictify!*\n` +
-    `Buy event tickets right here on WhatsApp.`
+    `Buy event tickets right here on WhatsApp.\n\n` +
+    `💡 Know the event? Just *type its name* to jump straight to it.`
   );
 }
 
@@ -233,6 +234,7 @@ function helpText() {
     `❓ *Tictify Help*\n\n` +
     `Here's what I can do:\n` +
     `🔎 *Browse events* — see what's on and buy tickets without leaving this chat (card, payment link, or bank transfer)\n` +
+    `⌨️ *Type an event name* — e.g. "afrobeats night" — to search and skip the list entirely\n` +
     `🎫 *My tickets* — resend your QR codes to this chat\n` +
     `💼 *Organizer zone* — sales & balance, create events, and *scan guest tickets at the gate* (photo or typed code)\n` +
     `🤝 *Affiliate zone* — your promo code, stats and a ready-to-forward share kit\n` +
@@ -486,35 +488,8 @@ export async function handleIncoming(phone, message, transport) {
 /* ================= MAIN MENU ================= */
 async function handleMenu(session, input, t, phone) {
   switch (input) {
-    case "1": {
-      const events = await Event.find({ status: "LIVE", date: { $gt: new Date() } })
-        .sort("date")
-        .limit(8)
-        .lean();
-
-      if (!events.length) {
-        await setSession(session, "MENU", {});
-        return t.send(
-          phone,
-          `😔 No upcoming events right now.\n\nNew events go live all the time — check back soon!\n\nType *menu* to go back.`,
-        );
-      }
-
-      await setSession(session, "BROWSING", {
-        eventIds: events.map((e) => String(e._id)),
-      });
-      return uiList(
-        t,
-        phone,
-        `🔎 *Upcoming events*\n\nPick one to see details.`,
-        "Events",
-        events.map((e, i) => ({
-          id: String(i + 1),
-          title: e.title,
-          description: `${fmtDate(e.date)}${e.city ? ` · ${e.city}` : ""} · ${fromPriceLabel(e)}`,
-        })),
-      );
-    }
+    case "1":
+      return await showEventPage(session, t, phone, 0);
 
     case "2":
       await setSession(session, "TICKETS_EMAIL", {});
@@ -557,21 +532,116 @@ async function handleMenu(session, input, t, phone) {
         `🤝 *Affiliate zone*\n\nWhat's your Tictify affiliate account email? We'll send a *6-digit code* there to verify it's really you.`,
       );
 
-    default:
-      /* unknown input → main menu (spec: any unrecognised text) */
+    default: {
+      /* Unrecognised text at the menu is most often the name of an
+         event the guest already has in mind, so try that before
+         falling back to redisplaying the menu. */
+      const hit = await searchEvents(input);
+      if (hit) return showSearchResult(session, hit, input, t, phone);
+
       await setSession(session, "MENU", {});
       return showMainMenu(t, phone, session);
+    }
   }
+}
+
+/* ================= BROWSE LIST (PAGED) =================
+   WhatsApp interactive lists are hard-capped at 10 rows by the Cloud
+   API (see sendList in whatsapp.service.js). The old code coped by
+   asking for only 8 events — which silently hid every event after the
+   8th, with nothing in the UI to say more existed.
+
+   So: PAGE_SIZE rows of events plus one "More events" row, which keeps
+   the whole list reachable while staying inside the 10-row ceiling.
+
+   Numbering restarts at 1 on every page and `eventIds` holds only the
+   CURRENT page, so the number a guest taps always lines up with what
+   they can see. `evPage` remembers where they are. ── */
+const EV_PAGE_SIZE = 9;
+const EV_MORE_ID = String(EV_PAGE_SIZE + 1); // the "More events" row
+
+function liveEventFilter() {
+  return { status: "LIVE", date: { $gt: new Date() } };
+}
+
+/* One page of live events, oldest date first. Asks for one extra row
+   beyond the page to learn whether a "More" affordance is warranted
+   without paying for a second count query. */
+async function showEventPage(session, t, phone, page) {
+  const skip = page * EV_PAGE_SIZE;
+  const batch = await Event.find(liveEventFilter())
+    .sort("date")
+    .skip(skip)
+    .limit(EV_PAGE_SIZE + 1)
+    .lean();
+
+  const events = batch.slice(0, EV_PAGE_SIZE);
+  const hasMore = batch.length > EV_PAGE_SIZE;
+
+  if (!events.length) {
+    /* Page 0 empty = genuinely nothing on. A later page coming back
+       empty means events ended while the guest was reading, so send
+       them back to page 0 rather than to a dead end. */
+    if (page > 0) return showEventPage(session, t, phone, 0);
+    await setSession(session, "MENU", {});
+    return t.send(
+      phone,
+      `😔 No upcoming events right now.\n\nNew events go live all the time — check back soon!\n\nType *menu* to go back.`,
+    );
+  }
+
+  await setSession(session, "BROWSING", {
+    eventIds: events.map((e) => String(e._id)),
+    evPage: page,
+    evHasMore: hasMore,
+  });
+
+  const rows = events.map((e, i) => ({
+    id: String(i + 1),
+    title: e.title,
+    description: `${fmtDate(e.date)}${e.city ? ` · ${e.city}` : ""} · ${fromPriceLabel(e)}`,
+  }));
+  if (hasMore) {
+    rows.push({
+      id: EV_MORE_ID,
+      title: "➡️ More events",
+      description: "Show the next page",
+    });
+  }
+
+  const heading = page === 0 ? "🔎 *Upcoming events*" : `🔎 *Upcoming events* — page ${page + 1}`;
+  return uiList(
+    t,
+    phone,
+    `${heading}\n\nPick one to see details, or *type an event name* to search.`,
+    "Events",
+    rows,
+  );
 }
 
 /* ================= BROWSING → EVENT DETAIL ================= */
 async function handleBrowsing(session, input, t, phone) {
   const ids = Array.isArray(session.data?.eventIds) ? session.data.eventIds : [];
+  const page = Number(session.data?.evPage) || 0;
+
+  /* "More events" — only honoured when this page actually offered it,
+     so the number can't be used to page past the end of the list. */
+  if (input === EV_MORE_ID && session.data?.evHasMore) {
+    return showEventPage(session, t, phone, page + 1);
+  }
+
   const idx = parseInt(input, 10);
   if (!Number.isInteger(idx) || idx < 1 || idx > ids.length) {
+    /* Not a row number — treat it as an event-name search before
+       giving up, so "afrobeats" works the same here as at the menu. */
+    const hit = await searchEvents(input);
+    if (hit) return showSearchResult(session, hit, input, t, phone);
+
     return t.send(
       phone,
-      `Please reply with a number from the list (1-${ids.length || 1}), or type *menu*.`,
+      `Please reply with a number from the list (1-${ids.length || 1})${
+        session.data?.evHasMore ? ` or *${EV_MORE_ID}* for more events` : ""
+      }, type an *event name* to search, or *menu*.`,
     );
   }
 
@@ -586,6 +656,83 @@ async function handleBrowsing(session, input, t, phone) {
   }
 
   return showEventDetail(session, event, t, phone);
+}
+
+/* ================= EVENT NAME SEARCH =================
+   A guest who knows what they want shouldn't have to page through a
+   list to find it — they can just type "afrobeats night".
+
+   Returns one of:
+     null                       nothing worth showing (caller falls back)
+     { one: event }             a single confident match → jump straight in
+     { many: [events] }         several matches → let them pick
+
+   Deliberately conservative about what counts as a search term. Short
+   or numeric input is rejected because those are almost always row
+   numbers, OTP digits or stray taps, and hijacking them would break
+   the state machine. Matching is on title and city only — never
+   description, which would match far too loosely. ── */
+const SEARCH_MIN_LEN = 3;
+const SEARCH_MAX_RESULTS = EV_PAGE_SIZE;
+
+function isSearchableTerm(input) {
+  const s = String(input || "").trim();
+  if (s.length < SEARCH_MIN_LEN) return false;
+  if (/^\d+$/.test(s)) return false; // row number / OTP digits
+  if (EMAIL_RE.test(s)) return false; // an email answers a prompt, not a search
+  /* Deep-link commands have their own handlers and must not be eaten. */
+  if (/^(event|ref)\b/i.test(s)) return false;
+  if (["menu", "hi", "hello", "hey", "start", "help"].includes(s.toLowerCase())) return false;
+  return true;
+}
+
+async function searchEvents(input) {
+  if (!isSearchableTerm(input)) return null;
+
+  const term = String(input).trim();
+  const rx = new RegExp(escapeRegex(term), "i");
+  const events = await Event.find({
+    ...liveEventFilter(),
+    $or: [{ title: rx }, { city: rx }],
+  })
+    .sort("date")
+    .limit(SEARCH_MAX_RESULTS + 1)
+    .lean();
+
+  if (!events.length) return null;
+  if (events.length === 1) return { one: events[0] };
+  return { many: events.slice(0, SEARCH_MAX_RESULTS), term };
+}
+
+/* Render whatever searchEvents found. A single hit goes straight to the
+   event detail — the guest already told us which one they meant. */
+async function showSearchResult(session, hit, term, t, phone) {
+  if (hit.one) {
+    return showEventDetail(
+      session,
+      hit.one,
+      t,
+      phone,
+      `🔎 Found *${hit.one.title}*.\n\n`,
+    );
+  }
+
+  await setSession(session, "BROWSING", {
+    eventIds: hit.many.map((e) => String(e._id)),
+    evPage: 0,
+    evHasMore: false, // a result set, not a page of the full list
+  });
+  return uiList(
+    t,
+    phone,
+    `🔎 *${hit.many.length} events match "${term}"*\n\nPick one to see details.`,
+    "Results",
+    hit.many.map((e, i) => ({
+      id: String(i + 1),
+      title: e.title,
+      description: `${fmtDate(e.date)}${e.city ? ` · ${e.city}` : ""} · ${fromPriceLabel(e)}`,
+    })),
+  );
 }
 
 /* ================= EVENT DETAIL → TIER PICKER =================
