@@ -1,6 +1,7 @@
 import User from "../models/User.js";
 import bcrypt from "bcryptjs";
 import { sendEmail } from "../services/email.service.js";
+import { normalizeWhatsApp } from "../utils/phone.js";
 
 /* =====================================================
    EMAIL VERIFICATION HELPERS (OTP at signup)
@@ -94,10 +95,32 @@ export const register = async (req, res) => {
       });
     }
 
+    /* WhatsApp number is mandatory for organizers — it's how the bot
+       matches this account to the handset that messages it, and how
+       sales alerts reach them. Normalised so a number typed here is
+       comparable to the E.164 form the Cloud API sends. */
+    const whatsapp = normalizeWhatsApp(req.body.whatsapp);
+    if (!whatsapp) {
+      return res.status(400).json({
+        message:
+          "A valid WhatsApp number is required (e.g. 0801 234 5678)",
+      });
+    }
+
     const existingUser = await User.findOne({ email });
     if (existingUser) {
       return res.status(409).json({
         message: "Email already registered",
+      });
+    }
+
+    /* One account per WhatsApp number — two accounts on one handset
+       would make bot linking ambiguous. Enforced here rather than with
+       a unique index (see the note in models/User.js). */
+    const existingNumber = await User.findOne({ whatsapp });
+    if (existingNumber) {
+      return res.status(409).json({
+        message: "That WhatsApp number is already linked to another account",
       });
     }
 
@@ -126,7 +149,11 @@ export const register = async (req, res) => {
         role,
         referredBy,
         affiliateCode,
+        whatsapp,
         emailVerified: false, // must confirm the emailed code first
+        /* whatsappVerifiedAt intentionally unset: signup proves the
+           email, not control of the handset. The bot's OTP link is
+           what proves the number. */
       });
       otp = setVerifyOtp(user);
       await user.save();
@@ -172,6 +199,7 @@ export const register = async (req, res) => {
           id: user._id,
           name: user.name,
           role: user.role,
+          whatsapp: user.whatsapp || null,
         },
       });
     }
@@ -238,6 +266,7 @@ export const login = async (req, res) => {
         name: user.name,
         role: user.role,
         affiliateCode: user.affiliateCode || null,
+        whatsapp: user.whatsapp || null,
       },
     });
   } catch (error) {
@@ -321,6 +350,7 @@ export const verifyEmail = async (req, res) => {
         name: user.name,
         role: user.role,
         affiliateCode: user.affiliateCode || null,
+        whatsapp: user.whatsapp || null,
       },
     });
   } catch (error) {
@@ -442,5 +472,67 @@ export const resetPassword = async (req, res) => {
   } catch (err) {
     console.error("RESET PASSWORD ERROR:", err);
     return res.status(500).json({ message: "Could not reset password" });
+  }
+};
+
+/* =====================================================
+   UPDATE PROFILE — PATCH /api/auth/me
+   Used by the dashboard backfill prompt ("add your WhatsApp
+   number to link your events to the bot") and by the bot's
+   own registration flow. Accepts { whatsapp }; everything else
+   is ignored rather than silently accepted.
+===================================================== */
+export const updateProfile = async (req, res) => {
+  try {
+    /* The JWT only carries id/role, so load the real document. */
+    const user = await User.findById(req.user.id);
+    if (!user) {
+      return res.status(404).json({ message: "Account not found" });
+    }
+
+    const updates = {};
+
+    if (req.body.whatsapp !== undefined) {
+      const whatsapp = normalizeWhatsApp(req.body.whatsapp);
+      if (!whatsapp) {
+        return res.status(400).json({
+          message: "That doesn't look like a valid WhatsApp number",
+        });
+      }
+      /* One account per number — enforced here for the same reason
+         as in register (see models/User.js). */
+      const taken = await User.findOne({
+        whatsapp,
+        _id: { $ne: user._id },
+      });
+      if (taken) {
+        return res.status(409).json({
+          message: "That WhatsApp number is already linked to another account",
+        });
+      }
+      updates.whatsapp = whatsapp;
+    }
+
+    if (Object.keys(updates).length === 0) {
+      return res.status(400).json({ message: "Nothing to update" });
+    }
+
+    Object.assign(user, updates);
+    await user.save();
+
+    return res.json({
+      user: {
+        id: user._id,
+        name: user.name,
+        role: user.role,
+        affiliateCode: user.affiliateCode || null,
+        whatsapp: user.whatsapp || null,
+        /* The dashboard banner keys off this to know when to disappear. */
+        whatsappVerifiedAt: user.whatsappVerifiedAt || null,
+      },
+    });
+  } catch (err) {
+    console.error("UPDATE PROFILE ERROR:", err);
+    return res.status(500).json({ message: "Could not update profile" });
   }
 };

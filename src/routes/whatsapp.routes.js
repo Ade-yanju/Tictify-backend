@@ -41,14 +41,23 @@ router.post("/webhook", (req, res) => {
       ? req.body
       : Buffer.from(JSON.stringify(req.body || {}));
 
-    /* Optional HMAC check — only when Meta signs AND we hold the secret */
+    /* HMAC check — enforced whenever we actually hold the secret.
+       Meta signs EVERY webhook POST, so a missing signature means the
+       request did not come from Meta. Treating "no header" as "nothing
+       to check" let anyone who learned this URL inject messages as any
+       phone number and drive the bot's state machine on their behalf
+       (OTP emails, ticket lookups, outbound sends). Absent header and
+       bad header are now the same answer: drop it. */
     const appSecret = process.env.WHATSAPP_APP_SECRET;
     const signature = req.headers["x-hub-signature-256"];
-    if (
-      signature &&
-      appSecret &&
-      !String(appSecret).toLowerCase().includes("your_")
-    ) {
+    const secretConfigured =
+      appSecret && !String(appSecret).toLowerCase().includes("your_");
+
+    if (secretConfigured) {
+      if (!signature) {
+        console.error("❌ WhatsApp webhook missing signature — ignored");
+        return;
+      }
       const expected =
         "sha256=" +
         crypto.createHmac("sha256", appSecret).update(raw).digest("hex");

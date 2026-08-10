@@ -10,7 +10,7 @@ export const organizerDashboard = async (req, res) => {
     const now = new Date();
 
     const [organizer, events, wallet, salesByEvent] = await Promise.all([
-      User.findById(organizerId).select("name email avatar").lean(),
+      User.findById(organizerId).select("name email avatar whatsapp").lean(),
       Event.find({ organizer: organizerId }).sort({ date: -1 }).lean(),
       Wallet.findOneAndUpdate(
         { organizer: organizerId },
@@ -67,6 +67,11 @@ export const organizerDashboard = async (req, res) => {
         name: organizer?.name || "Organizer",
         email: organizer?.email || "",
         avatar: organizer?.avatar || null,
+        /* Drives the dashboard's "add your WhatsApp number" banner.
+           Sent from here rather than trusting the client's stored
+           session, which predates this field for every organizer who
+           was already logged in when it shipped. */
+        whatsapp: organizer?.whatsapp || null,
       },
       stats: {
         events: events.length,

@@ -1,5 +1,6 @@
 import express from "express";
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
+import { requireWhatsApp } from "../middlewares/requireWhatsApp.js";
 import {
   requestWithdrawal,
   confirmWithdrawal,
@@ -14,6 +15,7 @@ router.post(
   "/request",
   authenticate,
   authorize("organizer", "ambassador", "affiliate"), // partners & affiliates withdraw too
+  requireWhatsApp, // payouts need a reachable number on file
   requestWithdrawal,
 );
 

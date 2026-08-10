@@ -7,7 +7,9 @@ import {
   resendVerification,
   forgotPassword,
   resetPassword,
+  updateProfile,
 } from "../controllers/auth.controller.js";
+import { authenticate } from "../middlewares/auth.middleware.js";
 
 const router = express.Router();
 
@@ -35,5 +37,10 @@ router.post("/verify-email", authLimiter, verifyEmail);
 router.post("/resend-verification", resendLimiter, resendVerification);
 router.post("/forgot-password", authLimiter, forgotPassword);
 router.post("/reset-password", authLimiter, resetPassword);
+
+/* Profile update (currently: WhatsApp number backfill). Rate-limited
+   with the same bucket as the other auth writes — this endpoint can be
+   used to probe which numbers are already registered, via the 409. */
+router.patch("/me", authLimiter, authenticate, updateProfile);
 
 export default router;

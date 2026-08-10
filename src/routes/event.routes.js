@@ -11,11 +11,16 @@ import {
 } from "../controllers/event.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
+import { requireWhatsApp } from "../middlewares/requireWhatsApp.js";
 
 const router = express.Router();
 
-/* ================= CREATE ================= */
-router.post("/", authenticate, authorize("organizer"), createEvent);
+/* ================= CREATE =================
+   Creating a NEW event requires a WhatsApp number on the account —
+   that's what links the event to the bot for management and alerts.
+   Editing an EXISTING event is deliberately left open so nobody is
+   locked out of fixing a live event's details mid-sale. */
+router.post("/", authenticate, authorize("organizer"), requireWhatsApp, createEvent);
 router.put("/:id", authenticate, authorize("organizer"), updateEvent);
 
 /* ================= ORGANIZER ================= */

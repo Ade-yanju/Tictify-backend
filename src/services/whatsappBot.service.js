@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import bcrypt from "bcryptjs";
 import mongoose from "mongoose";
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
@@ -24,7 +25,8 @@ import {
 import { transferFee } from "./paystack.service.js";
 import { resolveDiscount } from "../controllers/discount.controller.js";
 import { performScan, transferTicket } from "../controllers/ticket.controller.js";
-import { buildEventSlug } from "../utils/resolveEvent.js";
+import { buildEventSlug, findEventByIdOrSlug, findEventByShortCode } from "../utils/resolveEvent.js";
+import { normalizeWhatsApp } from "../utils/phone.js";
 
 /* =====================================================
    WHATSAPP BOT — THE BRAIN
@@ -41,6 +43,19 @@ const SESSION_STALE_MS = 24 * 60 * 60 * 1000; // reset state (not the account li
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /* promo attribution: "ref CODE" anywhere in a message */
 const REF_RE = /\bref[ :]+([A-Za-z0-9-]{2,30})\b/i;
+
+/* 🎟️ Event deep link: "event <slug-or-code>". This is what a guest
+   who tapped "Buy on WhatsApp" on a shared event arrives with, so it
+   must win from ANY state and drop them straight on the tier picker —
+   a guest who came for one specific event should never have to hunt
+   for it in the browse list.
+
+   The key must be CODE-SHAPED: a full slug ending in the 8-hex id tail,
+   a bare 8-hex tail, or a 24-hex ObjectId. Matching any bare word here
+   would hijack ordinary prose — "what event should i attend" would be
+   answered with "that link looks old" instead of the menu. */
+const EVENT_RE =
+  /\bevent[ :]+((?:[A-Za-z0-9-]*-)?[0-9a-fA-F]{8}|[0-9a-fA-F]{24})\b/i;
 const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const MIN_WITHDRAWAL = 500;
@@ -139,7 +154,16 @@ function parseEventDate(input) {
 
 /* ── transport helpers: interactive first, numbered text otherwise.
    A stub (or a failed API call) returning success:false triggers the
-   text fallback via plain send — the bot never goes silent. ── */
+   text fallback via plain send — the bot never goes silent.
+
+   NOTE on the double fallback: the real sendButtons/sendList in
+   whatsapp.service.js ALREADY fall back to text internally and report
+   { success:true, fellBack:true } when that text lands, so the guard
+   below short-circuits and the guest never gets the same message twice.
+   The extra send here only fires when the text send failed too — i.e.
+   nothing was delivered at all — so it's a genuine last resort, not a
+   duplicate. It also covers transports that DON'T self-fall-back
+   (the test stubs, and any future custom transport). ── */
 async function uiButtons(t, phone, body, buttons) {
   if (typeof t.sendButtons === "function") {
     const r = await Promise.resolve(t.sendButtons(phone, body, buttons)).catch(
@@ -255,13 +279,45 @@ export async function handleIncoming(phone, message, transport) {
       session = await WhatsAppSession.create({ phone, state: "MENU", data: {} });
     }
 
-    /* 🎁 Promo attribution: "ref CODE" anywhere, from ANY state */
+    /* 🎁 Promo attribution: "ref CODE" anywhere, from ANY state.
+       Applied BEFORE the event deep link, not instead of it — an
+       affiliate's share carries both ("event <slug> ref <code>"), and
+       dropping either one would cost the affiliate their commission or
+       send the guest to the wrong screen. setSession carries promoter
+       across every later state hop on its own. */
     const refMatch = input.match(REF_RE);
     if (refMatch) {
       clearOtpFields(session);
       await setSession(session, "MENU", { promoter: refMatch[1].toUpperCase() });
+    }
+
+    /* 🎟️ Event deep link: jump a cold guest straight to the tickets */
+    const eventMatch = input.match(EVENT_RE);
+    if (eventMatch) {
+      const key = eventMatch[1];
+      const found =
+        (await findEventByIdOrSlug(key)) || (await findEventByShortCode(key));
+      const event = found ? found.toObject?.() ?? found : null;
+      const live =
+        event && event.status === "LIVE" && new Date(event.date) > new Date();
+
+      if (live) {
+        clearOtpFields(session);
+        return showEventDetail(session, event, t, phone, "👋 *Welcome!*\n\n");
+      }
+      /* Dead or unknown link — say so plainly rather than dumping the
+         guest on a menu that looks like the link silently did nothing */
+      await setSession(session, "MENU", {});
+      await t.send(
+        phone,
+        event
+          ? `😕 *${event.title}* isn't on sale anymore.\n\nHere's what else is coming up 👇`
+          : `😕 I couldn't find that event — the link may be old.\n\nHere's what's coming up 👇`,
+      );
       return showMainMenu(t, phone, session);
     }
+
+    if (refMatch) return showMainMenu(t, phone, session);
 
     /* Stale conversation (>24h): back to the main menu. The
        organizerUser/affiliateUser links are permanent — only
@@ -347,6 +403,12 @@ export async function handleIncoming(phone, message, transport) {
         return await handleTransferEmail(session, input, t, phone);
       case "TRANSFER_CONFIRM":
         return await handleTransferConfirm(session, input, t, phone);
+      case "ORG_GATE":
+        return await handleOrgGate(session, input, t, phone);
+      case "ORG_REG_NAME":
+        return await handleOrgRegName(session, input, t, phone);
+      case "ORG_REG_EMAIL":
+        return await handleOrgRegEmail(session, input, t, phone);
       case "ORG_EMAIL":
         return await handleOrgEmail(session, input, t, phone);
       case "ORG_OTP":
@@ -466,10 +528,18 @@ async function handleMenu(session, input, t, phone) {
         await setSession(session, "ORG_MENU", {});
         return showOrgMenu(t, phone);
       }
-      await setSession(session, "ORG_EMAIL", {});
-      return t.send(
+      /* Ask BEFORE touching any email, so registration is a branch the
+         guest chooses — never a "that email wasn't found, want to sign
+         up?" fallback, which would leak which emails have accounts. */
+      await setSession(session, "ORG_GATE", {});
+      return uiButtons(
+        t,
         phone,
-        `💼 *Organizer zone*\n\nWhat's your Tictify account email? We'll send a *6-digit code* there to verify it's really you.`,
+        `💼 *Organizer zone*\n\nDo you already sell tickets on Tictify?`,
+        [
+          { id: "1", title: "Yes, link my acct" },
+          { id: "2", title: "No, sign me up" },
+        ],
       );
 
     case "4":
@@ -515,6 +585,20 @@ async function handleBrowsing(session, input, t, phone) {
     );
   }
 
+  return showEventDetail(session, event, t, phone);
+}
+
+/* ================= EVENT DETAIL → TIER PICKER =================
+   Shared by two entry points: picking a number off the browse list,
+   and the `event <code>` deep link a guest taps from a shared post.
+   Both must land on exactly the same tier picker, so this lives in
+   one place — the deep link is a shortcut INTO the funnel, never a
+   second implementation of it.
+
+   `prefix` lets the deep link greet a guest who arrived cold, since
+   they never saw the main menu. */
+async function showEventDetail(session, event, t, phone, prefix = "") {
+  const now = new Date();
   const tiers = event.ticketTypes || [];
   const tierLines = tiers.map((tier, i) => {
     const price = effectivePrice(tier, now);
@@ -534,7 +618,7 @@ async function handleBrowsing(session, input, t, phone) {
   });
 
   const detail =
-    `🎟️ *${event.title}*\n` +
+    `${prefix}🎟️ *${event.title}*\n` +
     `📅 ${fmtDate(event.date)}\n` +
     `📍 ${event.location}${event.city ? `, ${event.city}` : ""}\n\n` +
     `*Tickets:*\n${tierLines.join("\n")}`;
@@ -1069,12 +1153,217 @@ async function handleOrgOtp(session, input, t, phone) {
   /* Correct code → permanent link */
   session.organizerUser = new mongoose.Types.ObjectId(session.data.linkUserId);
   clearOtpFields(session);
+
+  /* ── Organic backfill ──
+     This exact moment proves BOTH things at once: they own the email
+     (the code was sent there) and they control this handset (the code
+     came back from it). That's a stronger proof than the web form
+     collects, so persist the number and stamp it verified.
+
+     Existing organizers therefore backfill themselves just by linking —
+     no migration, no separate prompt.
+
+     If the number is already on ANOTHER account we leave the account
+     untouched rather than stealing it: the chat link still works, but
+     the number stays where it is, and we say so instead of failing
+     silently. */
+  let numberNote = "";
+  const normalized = normalizeWhatsApp(phone);
+  if (normalized) {
+    try {
+      const owner = await User.findOne({
+        whatsapp: normalized,
+        _id: { $ne: session.organizerUser },
+      }).select("_id");
+
+      if (owner) {
+        numberNote =
+          `\n\n⚠️ Note: this number is saved on a different Tictify account, ` +
+          `so we didn't move it. Your events still work here.`;
+      } else {
+        await User.updateOne(
+          { _id: session.organizerUser },
+          { $set: { whatsapp: normalized, whatsappVerifiedAt: new Date() } },
+        );
+      }
+    } catch (err) {
+      /* Never let a backfill problem break the link the guest just
+         completed — the link is the thing they asked for. */
+      console.error("WA NUMBER BACKFILL FAILED:", err.message);
+    }
+  }
+
   await setSession(session, "ORG_MENU", {});
   return showOrgMenu(
     t,
     phone,
-    `✅ *Account linked!* This WhatsApp number is now connected to your organizer account.\n\n`,
+    `✅ *Account linked!* This WhatsApp number is now connected to your organizer account.${numberNote}\n\n`,
   );
+}
+
+/* ================= ORGANIZER: GATE (link vs register) ================= */
+async function handleOrgGate(session, input, t, phone) {
+  if (input === "1") {
+    await setSession(session, "ORG_EMAIL", {});
+    return t.send(
+      phone,
+      `💼 What's your Tictify account email? We'll send a *6-digit code* there to verify it's really you.`,
+    );
+  }
+  if (input === "2") {
+    await setSession(session, "ORG_REG_NAME", {});
+    return t.send(
+      phone,
+      `🎉 *Let's get you set up!*\n\nFirst — what's your *name* (or your brand's name)? This is what guests see on your events.`,
+    );
+  }
+  return uiButtons(
+    t,
+    phone,
+    `Please pick one — or type *menu* to go back.`,
+    [
+      { id: "1", title: "Yes, link my acct" },
+      { id: "2", title: "No, sign me up" },
+    ],
+  );
+}
+
+/* ================= ORGANIZER: REGISTER (NAME) ================= */
+async function handleOrgRegName(session, input, t, phone) {
+  const name = input.trim();
+  if (name.length < 2 || name.length > 60) {
+    return t.send(
+      phone,
+      `Please send a name between 2 and 60 characters, or type *menu* to cancel.`,
+    );
+  }
+  await setSession(session, "ORG_REG_EMAIL", { regName: name });
+  return t.send(
+    phone,
+    `Nice to meet you, *${name}*! 👋\n\nWhat's your *email address*? We'll send your dashboard login link there.`,
+  );
+}
+
+/* ================= ORGANIZER: REGISTER (EMAIL → CREATE) =================
+   Creates a real organizer account tied to THIS handset. No password is
+   collected in chat (it would sit in their message history forever);
+   instead we set an unguessable random one and email a set-password
+   link, reusing the existing forgot-password machinery verbatim
+   (resetTokenHash + resetTokenExp + the live /reset-password page).
+
+   emailVerified is true because the only way to finish setup is to open
+   the emailed link — that proves the address as well as an OTP would. */
+async function handleOrgRegEmail(session, input, t, phone) {
+  const email = input.toLowerCase().trim();
+  if (!EMAIL_RE.test(email)) {
+    return t.send(
+      phone,
+      `That doesn't look like an email. Try again, or type *menu* to cancel.`,
+    );
+  }
+
+  const name = session.data?.regName || "Organizer";
+
+  /* Existing email → do NOT create a duplicate. Send them down the link
+     path instead. This is safe to state plainly: they told us they're
+     signing up, so "you already have an account" is their own fact, not
+     a probe of someone else's. */
+  const existing = await User.findOne({ email }).select("_id");
+  if (existing) {
+    await setSession(session, "ORG_EMAIL", {});
+    return t.send(
+      phone,
+      `📧 You already have a Tictify account with that email!\n\n` +
+        `Send it again here and I'll email you a *6-digit code* to link this number to it.`,
+    );
+  }
+
+  const normalized = normalizeWhatsApp(phone);
+  if (!normalized) {
+    await setSession(session, "MENU", {});
+    return t.send(
+      phone,
+      `⚠️ I couldn't read this WhatsApp number. Please sign up at ${frontendUrl()}/register instead.`,
+    );
+  }
+
+  /* One account per handset — otherwise bot linking is ambiguous. */
+  const numberTaken = await User.findOne({ whatsapp: normalized }).select("_id");
+  if (numberTaken) {
+    await setSession(session, "ORG_EMAIL", {});
+    return t.send(
+      phone,
+      `📱 This WhatsApp number is already on a Tictify account.\n\n` +
+        `Send that account's *email* here and I'll link this chat to it.`,
+    );
+  }
+
+  try {
+    /* Random password nobody knows — the set-password email is the only
+       way in. 32 random bytes, hashed with the same cost as signup. */
+    const randomPassword = crypto.randomBytes(32).toString("hex");
+    const passwordHash = await bcrypt.hash(randomPassword, 12);
+
+    const user = await User.create({
+      name,
+      email,
+      passwordHash,
+      role: "organizer",
+      emailVerified: true,
+      whatsapp: normalized,
+      whatsappVerifiedAt: new Date(), // created FROM this handset
+    });
+
+    /* Set-password link — same token fields the web flow validates. */
+    const token = crypto.randomBytes(32).toString("hex");
+    user.resetTokenHash = crypto
+      .createHash("sha256")
+      .update(token)
+      .digest("hex");
+    user.resetTokenExp = new Date(Date.now() + 60 * 60 * 1000); // 1h
+    await user.save();
+
+    const link = `${frontendUrl()}/reset-password?token=${token}`;
+    sendEmail({
+      to: email,
+      subject: "Welcome to Tictify — set your password 🎟️",
+      html: `
+        <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;background:#f9fafb;border-radius:16px;">
+          <h2 style="color:#1a1a1a;margin-top:0;">Welcome to Tictify, ${name}!</h2>
+          <p style="color:#555;line-height:1.7;">Your organizer account was created from WhatsApp. Set a password to also manage your events on the web dashboard:</p>
+          <p style="text-align:center;margin:24px 0;">
+            <a href="${link}" style="background:#E8C96A;color:#080910;padding:14px 28px;border-radius:999px;text-decoration:none;font-weight:700;">Set my password</a>
+          </p>
+          <p style="color:#888;font-size:13px;line-height:1.7;">This link expires in 1 hour. You can keep using the WhatsApp bot either way — it's already linked to this account.</p>
+        </div>
+      `,
+    }).catch((e) => console.error("WA signup email failed:", e.message));
+
+    /* Link the chat immediately — they can work right now, password or
+       not. That's the whole promise of signing up inside WhatsApp. */
+    session.organizerUser = user._id;
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(
+      t,
+      phone,
+      `✅ *You're in, ${name}!* Your organizer account is live and linked to this number.\n\n` +
+        `📧 We emailed *${email}* a link to set your password for the web dashboard (optional — everything works here too).\n\n`,
+    );
+  } catch (err) {
+    if (err?.code === 11000) {
+      await setSession(session, "ORG_EMAIL", {});
+      return t.send(
+        phone,
+        `That email was just registered. Send it again here to link this number to it.`,
+      );
+    }
+    console.error("WA ORGANIZER SIGNUP ERROR:", err);
+    await setSession(session, "MENU", {});
+    return t.send(
+      phone,
+      `⚠️ Something went wrong creating your account. Please try again, or sign up at ${frontendUrl()}/register.`,
+    );
+  }
 }
 
 /* ================= ORGANIZER: SUBMENU ================= */

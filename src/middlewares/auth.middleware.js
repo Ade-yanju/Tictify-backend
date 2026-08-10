@@ -73,6 +73,10 @@ export const authenticate = async (req, res, next) => {
       name: user.name,
       email: user.email,
       affiliateCode: user.affiliateCode,
+      /* Carried so requireWhatsApp doesn't need a second lookup.
+         `|| null` keeps "not set" distinguishable from "not loaded". */
+      whatsapp: user.whatsapp || null,
+      whatsappVerifiedAt: user.whatsappVerifiedAt || null,
     };
 
     next();
@@ -126,6 +130,8 @@ export const optionalAuth = async (req, res, next) => {
         name: user.name,
         email: user.email,
         affiliateCode: user.affiliateCode,
+        whatsapp: user.whatsapp || null,
+        whatsappVerifiedAt: user.whatsappVerifiedAt || null,
       };
     }
 

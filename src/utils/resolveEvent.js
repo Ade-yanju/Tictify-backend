@@ -57,6 +57,23 @@ export function buildEventSlug(title, id) {
 
 const OBJECT_ID_RE = /^[0-9a-fA-F]{24}$/;
 const SUFFIX_RE = /-([0-9a-fA-F]{8})$/;
+export const SHORT_CODE_RE = /^[0-9a-fA-F]{8}$/;
+
+/* Match an event by the 8-hex tail of its _id. Shared by stale-slug
+   resolution (step 3 below) and by short-code lookups — the WhatsApp
+   deep link `event 95dfe858` carries only this tail, because a
+   prefilled chat message wants to stay short and typo-survivable.
+   Rare path, so the collection scan it costs is fine. */
+export function findEventByShortCode(code) {
+  const suffix = String(code ?? "").toLowerCase();
+  if (!SHORT_CODE_RE.test(suffix)) return null;
+
+  return Event.findOne({
+    $expr: {
+      $eq: [{ $substrBytes: [{ $toString: "$_id" }, 16, 8] }, suffix],
+    },
+  });
+}
 
 /**
  * Resolve an `/events/:id` style parameter to an Event document.
@@ -80,17 +97,11 @@ export async function findEventByIdOrSlug(idOrSlug) {
 
   /* 3️⃣ Stale slug — the title changed but the id suffix did not.
      Compared against the hex string of _id so a renamed event's old
-     links keep working forever. Rare path, so the collection scan
-     it costs is fine. */
+     links keep working forever. */
   const match = raw.match(SUFFIX_RE);
   if (!match) return null;
-  const suffix = match[1].toLowerCase();
 
-  return Event.findOne({
-    $expr: {
-      $eq: [{ $substrBytes: [{ $toString: "$_id" }, 16, 8] }, suffix],
-    },
-  });
+  return findEventByShortCode(match[1]);
 }
 
 /* Same resolution, but returns only the _id (as an ObjectId) — for
