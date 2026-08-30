@@ -3,7 +3,10 @@ import Feedback from "../models/Feedback.js";
 export async function submitFeedback(req, res) {
   const message = String(req.body.message || "").trim();
   if (message.length < 10) return res.status(400).json({ message: "Please enter at least 10 characters." });
-  const feedback = await Feedback.create({ user: req.user._id, name: req.user.name, email: req.user.email, category: req.body.category, rating: req.body.rating, message });
+  const name = String(req.user?.name || req.body.name || "").trim();
+  const email = String(req.user?.email || req.body.email || "").trim().toLowerCase();
+  if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ message: "Name and a valid email are required." });
+  const feedback = await Feedback.create({ user: req.user?._id, name, email, category: req.body.category, rating: req.body.rating, message });
   res.status(201).json({ feedback });
 }
 
