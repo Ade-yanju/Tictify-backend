@@ -1,4 +1,5 @@
 import User from "../models/User.js";
+import Ambassador from "../models/Ambassador.js";
 import bcrypt from "bcryptjs";
 import { sendEmail } from "../services/email.service.js";
 import { normalizeWhatsApp } from "../utils/phone.js";
@@ -128,7 +129,10 @@ export const register = async (req, res) => {
 
     /* Optional ambassador invite code (?invite=CODE on the register page) */
     const refRaw = String(req.body.referredBy || "").trim().toUpperCase();
-    const referredBy = /^[A-Z0-9_-]{2,30}$/.test(refRaw) ? refRaw : undefined;
+    const referralOwner = /^[A-Z0-9_-]{2,30}$/.test(refRaw)
+      ? (await User.findOne({ referralCode: refRaw }).select("_id").lean()) || (await Ambassador.findOne({ inviteCode: refRaw }).select("_id").lean())
+      : null;
+    const referredBy = referralOwner ? refRaw : undefined;
 
     /* Affiliates get a personal promo code at signup */
     let affiliateCode;

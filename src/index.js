@@ -23,9 +23,12 @@ import uploadRoutes from "./routes/upload.routes.js";
 import discountRoutes from "./routes/discount.routes.js";
 import affiliateRoutes from "./routes/affiliate.routes.js";
 import feedbackRoutes from "./routes/feedback.routes.js";
+import cronRoutes from "./routes/cron.routes.js";
 import whatsappRoutes from "./routes/whatsapp.routes.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
 import { reconcileAllSold } from "./services/soldReconcile.service.js";
+import { sendUpcomingEventReminders } from "./services/eventReminder.service.js";
+import { sendUpcomingEventReminders } from "./services/eventReminder.service.js";
 
 const app = express();
 
@@ -89,6 +92,7 @@ app.use("/api/uploads", uploadRoutes);
 app.use("/api/discounts", discountRoutes);
 app.use("/api/affiliates", affiliateRoutes);
 app.use("/api/feedback", feedbackRoutes);
+app.use("/api/cron", cronRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 
 /* ================= SERVER ================= */
@@ -116,6 +120,9 @@ setTimeout(
   () => processPendingPayouts().catch((e) => console.error("SWEEP:", e)),
   20 * 1000, // catch-up pass shortly after every deploy/restart
 );
+const REMINDER_SWEEP_MS = 30 * 60 * 1000;
+setInterval(() => sendUpcomingEventReminders().catch(e => console.error("REMINDER SWEEP:", e)), REMINDER_SWEEP_MS);
+setTimeout(() => sendUpcomingEventReminders().catch(e => console.error("REMINDER START:", e)), 30000);
 
 /* Self-healing sold counters: each tier's `sold` is recounted from the
    SUCCESS payments that are its only real source of truth, so a missed

@@ -49,6 +49,7 @@ const userSchema = new mongoose.Schema(
 
     /* Ambassador invite code that referred this organizer (optional) */
     referredBy: { type: String, uppercase: true, trim: true, index: true },
+    referralCode: { type: String, uppercase: true, unique: true, sparse: true, index: true },
 
     /* Password reset (forgot-password flow) */
     resetTokenHash: String,

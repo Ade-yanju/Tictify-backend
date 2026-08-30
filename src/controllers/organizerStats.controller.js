@@ -1,5 +1,14 @@
 import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
+import User from "../models/User.js";
+import crypto from "crypto";
+
+export const getOrganizerReferrals = async (req, res) => {
+  const user = await User.findById(req.user._id);
+  if (!user.referralCode) { user.referralCode = `ORG-${crypto.randomBytes(3).toString("hex").toUpperCase()}`; await user.save(); }
+  const referrals = await User.countDocuments({ referredBy: user.referralCode, role: "organizer" });
+  res.json({ referralCode: user.referralCode, referrals });
+};
 
 export const getOrganizerEventStats = async (req, res) => {
   try {

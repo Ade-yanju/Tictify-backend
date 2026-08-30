@@ -101,6 +101,15 @@ export async function sendImage(to, imageUrl, caption) {
   });
 }
 
+/* Approved WhatsApp utility templates are required for business-initiated
+   messages outside the 24-hour customer-service window. */
+export async function sendUtilityTemplate(to, bodyParameters = []) {
+  const name = process.env.WHATSAPP_REMINDER_TEMPLATE_NAME;
+  const language = process.env.WHATSAPP_REMINDER_TEMPLATE_LANGUAGE || "en_US";
+  if (!name) return { success: false, message: "WhatsApp reminder template not configured" };
+  return postMessage({ messaging_product: "whatsapp", to: String(to), type: "template", template: { name, language: { code: language }, components: [{ type: "body", parameters: bodyParameters.map(text => ({ type: "text", text: String(text) })) }] } });
+}
+
 /* =====================================================
    INTERACTIVE MESSAGES (tappable buttons / lists)
    Every id doubles as the typed input the bot's state

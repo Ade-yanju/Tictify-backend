@@ -124,6 +124,18 @@ export const createEvent = async (req, res) => {
   }
 };
 
+/* Start a new draft from an organizer's previous event. */
+export const duplicateEvent = async (req, res) => {
+  try {
+    const source = await Event.findOne({ _id: req.params.id, organizer: req.user._id }).lean();
+    if (!source) return res.status(404).json({ message: "Event not found" });
+    const id = new mongoose.Types.ObjectId();
+    const start = new Date(Date.now() + 86400000); const end = new Date(Date.now() + 90000000);
+    const event = await Event.create({ ...source, _id: id, slug: buildEventSlug(`${source.title} Copy`, id), title: `${source.title} Copy`, status: "DRAFT", date: start, endDate: end, salesEndAt: end, ticketTypes: (source.ticketTypes || []).map(t => ({ ...t, sold: 0 })) });
+    res.status(201).json(event);
+  } catch (err) { console.error("DUPLICATE EVENT ERROR:", err); res.status(500).json({ message: "Could not duplicate event" }); }
+};
+
 /* ================= ORGANIZER EVENTS ================= */
 export const getOrganizerEvents = async (req, res) => {
   try {

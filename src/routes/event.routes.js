@@ -8,12 +8,15 @@ import {
   endEvent,
   deleteEvent,
   updateEvent
+  , duplicateEvent
 } from "../controllers/event.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 import { requireWhatsApp } from "../middlewares/requireWhatsApp.js";
+import { getEventTemplates } from "../controllers/eventTemplates.controller.js";
 
 const router = express.Router();
+router.get("/templates", getEventTemplates);
 
 /* ================= CREATE =================
    Creating a NEW event requires a WhatsApp number on the account —
@@ -22,6 +25,7 @@ const router = express.Router();
    locked out of fixing a live event's details mid-sale. */
 router.post("/", authenticate, authorize("organizer"), requireWhatsApp, createEvent);
 router.put("/:id", authenticate, authorize("organizer"), updateEvent);
+router.post("/duplicate/:id", authenticate, authorize("organizer"), duplicateEvent);
 
 /* ================= ORGANIZER ================= */
 router.get(

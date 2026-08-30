@@ -1,6 +1,6 @@
 import express from "express";
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
-import { getOrganizerEventStats } from "../controllers/organizerStats.controller.js";
+import { getOrganizerEventStats, getOrganizerReferrals } from "../controllers/organizerStats.controller.js";
 
 const router = express.Router();
 
@@ -10,5 +10,6 @@ router.get(
   authorize("organizer"),
   getOrganizerEventStats,
 );
+router.get("/referrals", authenticate, authorize("organizer"), getOrganizerReferrals);
 
 export default router;
