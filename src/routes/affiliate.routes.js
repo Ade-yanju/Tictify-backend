@@ -1,5 +1,6 @@
 import express from "express";
 import crypto from "crypto";
+import jwt from "jsonwebtoken";
 import bcrypt from "bcryptjs";
 import rateLimit from "express-rate-limit";
 import { authenticate } from "../middlewares/auth.middleware.js";
@@ -179,7 +180,8 @@ router.get("/join/callback", async (req, res) => {
       `,
     }).catch(() => {});
 
-    return res.redirect(`${FRONTEND}/login?welcome=affiliate`);
+    const token = jwt.sign({ id: user._id, role: user.role }, process.env.JWT_SECRET, { expiresIn: "7d" });
+    return res.redirect(`${FRONTEND}/affiliate/dashboard?affiliate_token=${encodeURIComponent(token)}`);
   } catch (err) {
     console.error("AFFILIATE CALLBACK ERROR:", err);
     return res.redirect(`${FRONTEND}/affiliate?payment=failed`);

@@ -14,9 +14,27 @@ export const getAdminAffiliates = async (req, res) => {
       .select("name email affiliateCode isActive createdAt")
       .sort("-createdAt")
       .lean();
+    const paidSignups = await AffiliateSignup.find({ status: "PAID" })
+      .select("name email affiliateCode amount createdAt")
+      .lean();
+    const knownEmails = new Set(affiliates.map((a) => a.email));
+    // Include paid memberships whose account creation was interrupted (or
+    // whose existing account retained another role) so payment and identity
+    // never become disconnected in the admin panel.
+    for (const signup of paidSignups) {
+      if (!knownEmails.has(signup.email)) affiliates.push({
+        _id: `signup-${signup._id}`,
+        name: signup.name,
+        email: signup.email,
+        affiliateCode: signup.affiliateCode || null,
+        isActive: false,
+        createdAt: signup.createdAt,
+        pendingAccount: true,
+      });
+    }
 
     const codes = affiliates.map((a) => a.affiliateCode).filter(Boolean);
-    const userIds = affiliates.map((a) => a._id);
+    const userIds = affiliates.map((a) => a._id).filter((id) => mongoose.isValidObjectId(id));
 
     const [sales, wallets, membership] = await Promise.all([
       /* ONE aggregate for every affiliate's ticket sales */
@@ -58,6 +76,7 @@ export const getAdminAffiliates = async (req, res) => {
         salesVolume: s.salesVolume || 0,
         totalEarned: w.totalEarnings || 0,
         balance: w.balance || 0,
+        pendingAccount: !!a.pendingAccount,
       };
     });
 

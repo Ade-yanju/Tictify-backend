@@ -22,6 +22,7 @@ import ambassadorRoutes from "./routes/ambassador.routes.js";
 import uploadRoutes from "./routes/upload.routes.js";
 import discountRoutes from "./routes/discount.routes.js";
 import affiliateRoutes from "./routes/affiliate.routes.js";
+import feedbackRoutes from "./routes/feedback.routes.js";
 import whatsappRoutes from "./routes/whatsapp.routes.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
 import { reconcileAllSold } from "./services/soldReconcile.service.js";
@@ -87,6 +88,7 @@ app.use("/api/ambassadors", ambassadorRoutes);
 app.use("/api/uploads", uploadRoutes);
 app.use("/api/discounts", discountRoutes);
 app.use("/api/affiliates", affiliateRoutes);
+app.use("/api/feedback", feedbackRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 
 /* ================= SERVER ================= */
