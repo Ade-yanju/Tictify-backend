@@ -28,7 +28,6 @@ import whatsappRoutes from "./routes/whatsapp.routes.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
 import { reconcileAllSold } from "./services/soldReconcile.service.js";
 import { sendUpcomingEventReminders } from "./services/eventReminder.service.js";
-import { sendUpcomingEventReminders } from "./services/eventReminder.service.js";
 
 const app = express();
 
