@@ -6,7 +6,7 @@ export async function submitFeedback(req, res) {
   const name = String(req.user?.name || req.body.name || "").trim();
   const email = String(req.user?.email || req.body.email || "").trim().toLowerCase();
   if (name.length < 2 || !/^\S+@\S+\.\S+$/.test(email)) return res.status(400).json({ message: "Name and a valid email are required." });
-  const feedback = await Feedback.create({ user: req.user?._id, name, email, category: req.body.category, rating: req.body.rating, message });
+  const feedback = await Feedback.create({ user: req.user?._id, role: req.user?.role || "guest", name, email, category: req.body.category, rating: req.body.rating, message });
   res.status(201).json({ feedback });
 }
 
