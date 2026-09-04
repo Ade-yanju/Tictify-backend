@@ -19,8 +19,6 @@
 ===================================================== */
 
 import Withdrawal from "../models/Withdrawal.js";
-import Wallet from "../models/Wallet.js";
-import WalletTransaction from "../models/WalletTransaction.js";
 import {
   payoutToBank,
   paystackConfigured,
@@ -69,24 +67,15 @@ export async function processPendingPayouts() {
           amount: payAmount,
           bankDetails: w.bankDetails,
           reason: `Tictify payout — ${w.bankDetails.accountName}`,
+          reference: `wd_${w._id}`,
+          recipientCode: w.paystackRecipientCode,
         });
 
-        claimed.status = "PAID";
+        claimed.status = "APPROVED";
         claimed.paystackReference = payout.reference;
+        claimed.paystackRecipientCode = payout.recipientCode;
         claimed.failureReason = undefined;
         await claimed.save();
-
-        await Wallet.updateOne(
-          { organizer: claimed.organizer },
-          { $inc: { totalWithdrawn: claimed.amount } },
-        );
-        await WalletTransaction.create({
-          organizer: claimed.organizer,
-          type: "DEBIT",
-          amount: claimed.amount,
-          reference: payout.reference,
-          description: "Automatic payout via Paystack",
-        });
 
         balance -= needed;
         console.log(

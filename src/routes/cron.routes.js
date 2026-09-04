@@ -1,6 +1,7 @@
 import express from "express";
 import crypto from "crypto";
 import { sendUpcomingEventReminders, sendPostEventReports } from "../services/eventReminder.service.js";
+import { processPendingPayouts } from "../services/payoutQueue.service.js";
 
 const router = express.Router();
 
@@ -20,6 +21,19 @@ router.all("/event-reminders", async (req, res) => {
   } catch (err) {
     console.error("CRON REMINDER ERROR:", err);
     res.status(500).json({ message: "Reminder processing failed" });
+  }
+});
+
+// Use this from Render Cron, GitHub Actions, or UptimeRobot so queued
+// payouts continue progressing even when the web dyno is sleeping.
+router.all("/payouts", async (req, res) => {
+  if (!authorized(req)) return res.status(401).json({ message: "Unauthorized" });
+  try {
+    await processPendingPayouts();
+    res.json({ ok: true, message: "Pending payouts processed" });
+  } catch (err) {
+    console.error("CRON PAYOUT ERROR:", err);
+    res.status(500).json({ message: "Payout processing failed" });
   }
 });
 

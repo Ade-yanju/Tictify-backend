@@ -51,10 +51,25 @@ export async function getAvailableBalance() {
   }
 }
 
+async function verifyTransfer(reference, headers) {
+  if (!reference) return null;
+  try {
+    const res = await fetch(
+      `https://api.paystack.co/transfer/verify/${encodeURIComponent(reference)}`,
+      { headers },
+    );
+    const body = await res.json();
+    if (body.status && body.data?.reference === reference) return body.data;
+  } catch {
+    // The original transfer error is more useful to the retry queue.
+  }
+  return null;
+}
+
 /* Create (or reuse) a transfer recipient, then fire the transfer.
    Returns { reference, transferCode, status } or throws with a
    human-readable message. */
-export async function payoutToBank({ amount, bankDetails, reason }) {
+export async function payoutToBank({ amount, bankDetails, reason, reference, recipientCode }) {
   if (!paystackConfigured) {
     throw new Error("Paystack is not configured");
   }
@@ -65,9 +80,9 @@ export async function payoutToBank({ amount, bankDetails, reason }) {
   };
 
   /* 1. Recipient */
-  const recipientRes = await fetch(
-    "https://api.paystack.co/transferrecipient",
-    {
+  let recipient = recipientCode ? { data: { recipient_code: recipientCode } } : null;
+  if (!recipient) {
+    const recipientRes = await fetch("https://api.paystack.co/transferrecipient", {
       method: "POST",
       headers,
       body: JSON.stringify({
@@ -77,11 +92,11 @@ export async function payoutToBank({ amount, bankDetails, reason }) {
         bank_code: bankDetails.bankCode,
         currency: "NGN",
       }),
-    },
-  );
-  const recipient = await recipientRes.json();
-  if (!recipient.status) {
-    throw new Error(recipient.message || "Bank account could not be verified");
+    });
+    recipient = await recipientRes.json();
+    if (!recipient.status) {
+      throw new Error(recipient.message || "Bank account could not be verified");
+    }
   }
 
   /* 2. Transfer (amount in kobo) */
@@ -93,18 +108,35 @@ export async function payoutToBank({ amount, bankDetails, reason }) {
       amount: Math.round(amount * 100),
       recipient: recipient.data.recipient_code,
       reason: reason || "Tictify payout",
+      ...(reference ? { reference } : {}),
     }),
   });
   const transfer = await transferRes.json();
   if (!transfer.status) {
     // Common causes: transfers not enabled, insufficient Paystack balance,
     // OTP required on transfers (must be disabled for automation)
+    // If the request timed out after Paystack accepted it, recover the
+    // existing transfer by reference instead of creating another payout.
+    const existing = await verifyTransfer(reference, headers);
+    if (existing && ["pending", "success"].includes(existing.status)) {
+      return {
+        reference: existing.reference,
+        transferCode: existing.transfer_code,
+        status: existing.status,
+        recipientCode: recipient.data.recipient_code,
+      };
+    }
     throw new Error(transfer.message || "Transfer failed");
+  }
+
+  if (transfer.data?.status === "otp") {
+    throw new Error("Paystack transfer OTP is enabled; disable transfer confirmation in Paystack before going live");
   }
 
   return {
     reference: transfer.data.reference,
     transferCode: transfer.data.transfer_code,
     status: transfer.data.status, // "pending" | "success" | "otp" ...
+    recipientCode: recipient.data.recipient_code,
   };
 }

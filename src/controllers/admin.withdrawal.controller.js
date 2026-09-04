@@ -59,11 +59,14 @@ export const approveWithdrawal = async (req, res) => {
           amount: payAmount,
           bankDetails: withdrawal.bankDetails || {},
           reason: `Tictify payout — ${withdrawal.bankDetails?.accountName}`,
+          reference: `wd_${withdrawal._id}`,
+          recipientCode: withdrawal.paystackRecipientCode,
         });
 
         paystackReference = payout.reference;
-        withdrawal.status = "PAID";
+        withdrawal.status = "APPROVED";
         withdrawal.paystackReference = paystackReference;
+        withdrawal.paystackRecipientCode = payout.recipientCode;
         await withdrawal.save();
       } catch (paystackErr) {
         /* Transfer failed → revert claim so it can be retried/rejected */
@@ -78,25 +81,25 @@ export const approveWithdrawal = async (req, res) => {
       }
     }
 
-    /* ── Book-keeping: funds leave escrow → totalWithdrawn ── */
-    await Wallet.updateOne(
-      { organizer: withdrawal.organizer },
-      { $inc: { totalWithdrawn: withdrawal.amount } },
-    );
-
-    await WalletTransaction.create({
-      organizer: withdrawal.organizer,
-      type: "DEBIT",
-      amount: withdrawal.amount,
-      reference: paystackReference || `WD-APPROVED-${withdrawal._id}`,
-      description: paystackConfigured
-        ? "Withdrawal paid out via Paystack"
-        : "Withdrawal approved — manual payout",
-    });
+    /* A Paystack transfer is accounted for by transfer.success. Keep the
+       legacy manual-payout path's bookkeeping here. */
+    if (!paystackConfigured) {
+      await Wallet.updateOne(
+        { organizer: withdrawal.organizer },
+        { $inc: { totalWithdrawn: withdrawal.amount } },
+      );
+      await WalletTransaction.create({
+        organizer: withdrawal.organizer,
+        type: "DEBIT",
+        amount: withdrawal.amount,
+        reference: `WD-APPROVED-${withdrawal._id}`,
+        description: "Withdrawal approved — manual payout",
+      });
+    }
 
     res.json({
       message: paystackConfigured
-        ? "Withdrawal approved and paid out"
+        ? "Withdrawal approved and sent to Paystack"
         : "Withdrawal approved for manual payout",
       status: withdrawal.status,
     });

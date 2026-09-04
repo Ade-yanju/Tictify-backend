@@ -49,6 +49,8 @@ const withdrawalSchema = new mongoose.Schema(
     },
     approvedAt: Date,
     paystackReference: String,
+    // Reused on retries so an uncertain API response cannot create a duplicate payout.
+    paystackRecipientCode: String,
   },
   { timestamps: true },
 );

@@ -229,28 +229,20 @@ export const confirmWithdrawal = async (req, res) => {
           amount: withdrawal.netAmount,
           bankDetails: bd,
           reason: `Tictify payout — ${bd.accountName}`,
+          reference: `wd_${withdrawal._id}`,
+          recipientCode: withdrawal.paystackRecipientCode,
         });
 
-        withdrawal.status = "PAID";
+        // Live Paystack transfers are asynchronous; the webhook confirms PAID.
+        withdrawal.status = "APPROVED";
         withdrawal.paystackReference = payout.reference;
+        withdrawal.paystackRecipientCode = payout.recipientCode;
         withdrawal.approvedAt = new Date();
         await withdrawal.save();
 
-        await Wallet.updateOne(
-          { organizer: userId },
-          { $inc: { totalWithdrawn: withdrawal.amount } },
-        );
-        await WalletTransaction.create({
-          organizer: userId,
-          type: "DEBIT",
-          amount: withdrawal.amount,
-          reference: payout.reference,
-          description: "Instant payout via Paystack",
-        });
-
         return res.json({
           message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} is on the way to your bank.`,
-          status: "PAID",
+          status: "APPROVED",
         });
       } catch (paystackErr) {
         /* Payout couldn't start (usually the T+1 settlement gap) —

@@ -29,10 +29,17 @@ async function handleTransferEvent(payload, res) {
     if (!reference) return res.status(200).send("ignored");
 
     if (payload.event === "transfer.success") {
-      await Withdrawal.updateOne(
-        { paystackReference: reference },
+      const withdrawal = await Withdrawal.findOneAndUpdate(
+        { paystackReference: reference, status: "APPROVED" },
         { status: "PAID" },
+        { new: true },
       );
+      if (withdrawal) {
+        await Wallet.updateOne(
+          { organizer: withdrawal.organizer },
+          { $inc: { totalWithdrawn: withdrawal.amount } },
+        );
+      }
       console.log(`✅ Transfer confirmed: ${reference}`);
       return res.status(200).send("processed");
     }
@@ -41,12 +48,12 @@ async function handleTransferEvent(payload, res) {
       payload.event === "transfer.failed" ||
       payload.event === "transfer.reversed"
     ) {
-      /* Atomic claim: only flip PAID/APPROVED → FAILED once,
+      /* Atomic claim: only flip APPROVED → FAILED once,
          so a duplicate webhook can never double-refund */
       const withdrawal = await Withdrawal.findOneAndUpdate(
         {
           paystackReference: reference,
-          status: { $in: ["PAID", "APPROVED"] },
+          status: "APPROVED",
         },
         {
           status: "FAILED",
@@ -65,7 +72,6 @@ async function handleTransferEvent(payload, res) {
         {
           $inc: {
             balance: withdrawal.amount,
-            totalWithdrawn: -withdrawal.amount,
           },
         },
         { upsert: true },
