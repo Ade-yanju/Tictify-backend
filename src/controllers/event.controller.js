@@ -58,14 +58,20 @@ export const createEvent = async (req, res) => {
       return res.status(401).json({ message: "Unauthorized" });
     }
 
+    if (!title?.trim() || !description?.trim() || !location?.trim()) {
+      return res.status(400).json({
+        message: "Event title, description, and location are required",
+      });
+    }
+
     if (!banner) {
       return res.status(400).json({ message: "Event banner is required" });
     }
 
-    if (!date || !endDate) {
+    if (!date || !endDate || isNaN(new Date(date)) || isNaN(new Date(endDate))) {
       return res
         .status(400)
-        .json({ message: "Event start and end time are required" });
+        .json({ message: "Enter valid event start and end times" });
     }
 
     if (new Date(endDate) <= new Date(date)) {
@@ -86,6 +92,21 @@ export const createEvent = async (req, res) => {
        document once — no save-then-patch-then-save round trip. */
     const _id = new mongoose.Types.ObjectId();
 
+    if (!Array.isArray(ticketTypes) || ticketTypes.length === 0) {
+      return res.status(400).json({ message: "At least one ticket type is required" });
+    }
+
+    if (ticketTypes.some((t) => !t?.name?.trim() || !Number.isFinite(Number(t.quantity)) || Number(t.quantity) <= 0 || !Number.isFinite(Number(t.price)) || Number(t.price) < 0)) {
+      return res.status(400).json({ message: "Each ticket needs a valid name, positive quantity, and non-negative price" });
+    }
+
+    /* Keep older clients/templates compatible with the current category enum. */
+    const categoryAliases = {
+      Music: "Concert",
+      Conference: "Workshop",
+      Lifestyle: "Nightlife",
+    };
+
     const event = await Event.create({
       _id,
       slug: buildEventSlug(title, _id),
@@ -103,7 +124,7 @@ export const createEvent = async (req, res) => {
       })),
       status,
       banner,
-      category: req.body.category || "Other",
+      category: categoryAliases[req.body.category] || req.body.category || "Other",
       city: String(req.body.city || "").trim(),
       bannerFit: req.body.bannerFit === "contain" ? "contain" : "cover",
       affiliatesEnabled: Boolean(req.body.affiliatesEnabled),
@@ -120,6 +141,9 @@ export const createEvent = async (req, res) => {
     res.status(201).json(event);
   } catch (err) {
     console.error("CREATE EVENT ERROR:", err);
+    if (err.name === "ValidationError") {
+      return res.status(400).json({ message: "Please check the event details and try again" });
+    }
     res.status(500).json({ message: "Failed to create event" });
   }
 };
