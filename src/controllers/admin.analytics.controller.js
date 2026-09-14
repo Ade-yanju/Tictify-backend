@@ -2,6 +2,7 @@
 import Ticket from "../models/Ticket.js";
 import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
+import { getPaystackAccountSnapshot } from "../services/paystack.service.js";
 
 export const adminAnalytics = async (req, res) => {
   try {
@@ -134,7 +135,7 @@ export const adminFinance = async (req, res) => {
       import("../models/AffiliateSignup.js"),
     ]);
 
-    const [sales, refunded, affCommission, ambCommission, joinFees, wdFees, liabilities] =
+    const [sales, refunded, affCommission, ambCommission, joinFees, wdFees, liabilities, paystack] =
       await Promise.all([
         Payment.aggregate([
           { $match: { status: "SUCCESS" } },
@@ -167,11 +168,17 @@ export const adminFinance = async (req, res) => {
         ]),
         Withdrawal.aggregate([
           { $match: { status: { $in: ["PAID", "APPROVED"] } } },
-          { $group: { _id: null, fees: { $sum: "$transferFee" }, paidOut: { $sum: "$netAmount" }, count: { $sum: 1 } } },
+          { $group: {
+              _id: null,
+              fees: { $sum: { $ifNull: ["$transferFee", 0] } },
+              paidOut: { $sum: { $ifNull: ["$netAmount", "$amount"] } },
+              count: { $sum: 1 },
+          } },
         ]),
         Wallet.aggregate([
           { $group: { _id: null, total: { $sum: "$balance" } } },
         ]),
+        getPaystackAccountSnapshot(),
       ]);
 
     const s = sales[0] || {};
@@ -213,6 +220,19 @@ export const adminFinance = async (req, res) => {
       /* What Tictify actually keeps */
       netPlatformRevenue:
         platformFees + memberships + withdrawalFeeMargin - ambPaid,
+      /* Database totals provide the all-time Tictify audit trail. The live
+         Paystack snapshot below is the actual available account balance plus
+         the provider's most recent pay-in/pay-out ledger entries. */
+      cashFlow: {
+        moneyIn: (s.grossVolume || 0) + memberships,
+        moneyOut: (wdFees[0]?.paidOut || 0) + (refunded[0]?.amount || 0),
+        netRecorded:
+          (s.grossVolume || 0) +
+          memberships -
+          (wdFees[0]?.paidOut || 0) -
+          (refunded[0]?.amount || 0),
+      },
+      paystack,
     });
   } catch (err) {
     console.error("ADMIN FINANCE ERROR:", err);

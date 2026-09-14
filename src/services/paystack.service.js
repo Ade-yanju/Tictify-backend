@@ -11,10 +11,41 @@
 ===================================================== */
 
 const PAYSTACK_SECRET_KEY = process.env.PAYSTACK_SECRET_KEY;
+const PAYSTACK_API = "https://api.paystack.co";
 
 export const paystackConfigured = Boolean(
   PAYSTACK_SECRET_KEY && PAYSTACK_SECRET_KEY.startsWith("sk_"),
 );
+
+function paystackHeaders() {
+  return { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` };
+}
+
+/* Keep dashboard calls bounded. A temporary Paystack outage should not make
+   the whole admin dashboard hang indefinitely. */
+async function paystackGet(path, query = {}) {
+  const url = new URL(`${PAYSTACK_API}${path}`);
+  Object.entries(query).forEach(([key, value]) => {
+    if (value != null) url.searchParams.set(key, String(value));
+  });
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 8_000);
+
+  try {
+    const response = await fetch(url, {
+      headers: paystackHeaders(),
+      signal: controller.signal,
+    });
+    const body = await response.json().catch(() => ({}));
+    if (!response.ok || !body.status) {
+      throw new Error(body.message || `Paystack request failed (${response.status})`);
+    }
+    return body;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
 
 /* Withdrawal fee — flat ₦100 charged to the withdrawer:
    ₦50 stamp duty + ₦50 platform/maintenance fee.
@@ -39,16 +70,95 @@ export function paystackTransferCharge(amount) {
 export async function getAvailableBalance() {
   if (!paystackConfigured) return null;
   try {
-    const res = await fetch("https://api.paystack.co/balance", {
-      headers: { Authorization: `Bearer ${PAYSTACK_SECRET_KEY}` },
-    });
-    const body = await res.json();
-    if (!body.status) return null;
+    const body = await paystackGet("/balance");
     const ngn = (body.data || []).find((b) => b.currency === "NGN");
     return ngn ? ngn.balance / 100 : null;
   } catch {
     return null;
   }
+}
+
+/* Live Paystack account view for admin reporting. The ledger endpoint is
+   intentionally limited to the latest page: the database aggregates below
+   remain the all-time Tictify audit totals, while these entries reconcile the
+   account's actual recent pay-ins and pay-outs. */
+export async function getPaystackAccountSnapshot({ perPage = 20 } = {}) {
+  const empty = {
+    configured: paystackConfigured,
+    currency: "NGN",
+    balance: null,
+    balanceFetchedAt: null,
+    ledger: [],
+    ledgerMeta: null,
+    ledgerFetchedAt: null,
+    recentMoneyIn: 0,
+    recentMoneyOut: 0,
+    recentNetChange: 0,
+    error: null,
+  };
+
+  if (!paystackConfigured) {
+    return { ...empty, error: "Paystack is not configured" };
+  }
+
+  const [balanceResult, ledgerResult] = await Promise.allSettled([
+    paystackGet("/balance"),
+    paystackGet("/balance/ledger", { perPage, page: 1 }),
+  ]);
+
+  const snapshot = { ...empty };
+  const errors = [];
+
+  if (balanceResult.status === "fulfilled") {
+    const ngn = (balanceResult.value.data || []).find(
+      (item) => item.currency === "NGN",
+    );
+    if (ngn) {
+      snapshot.balance = Number(ngn.balance || 0) / 100;
+      snapshot.balanceFetchedAt = new Date().toISOString();
+    } else {
+      errors.push("Paystack returned no NGN balance");
+    }
+  } else {
+    errors.push(balanceResult.reason?.message || "Balance unavailable");
+  }
+
+  if (ledgerResult.status === "fulfilled") {
+    const sourceEntries = (ledgerResult.value.data || []).filter(
+      (entry) => !entry.currency || entry.currency === "NGN",
+    );
+    const ledger = sourceEntries.map((entry) => ({
+      id: entry.id,
+      difference: Number(entry.difference || 0) / 100,
+      balance: Number(entry.balance || 0) / 100,
+      currency: entry.currency || "NGN",
+      reason: entry.reason || "",
+      source: entry.model_responsible || "Paystack",
+      sourceId: entry.model_row || null,
+      createdAt: entry.createdAt || entry.created_at || null,
+    }));
+
+    snapshot.ledger = ledger;
+    snapshot.ledgerMeta = ledgerResult.value.meta || null;
+    snapshot.ledgerFetchedAt = new Date().toISOString();
+    snapshot.recentMoneyIn = ledger.reduce(
+      (total, entry) => total + (entry.difference > 0 ? entry.difference : 0),
+      0,
+    );
+    snapshot.recentMoneyOut = ledger.reduce(
+      (total, entry) => total + (entry.difference < 0 ? Math.abs(entry.difference) : 0),
+      0,
+    );
+    snapshot.recentNetChange = ledger.reduce(
+      (total, entry) => total + entry.difference,
+      0,
+    );
+  } else {
+    errors.push(ledgerResult.reason?.message || "Ledger unavailable");
+  }
+
+  snapshot.error = errors.length ? errors.join("; ") : null;
+  return snapshot;
 }
 
 async function verifyTransfer(reference, headers) {
