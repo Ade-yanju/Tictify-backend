@@ -135,7 +135,7 @@ export const adminFinance = async (req, res) => {
       import("../models/AffiliateSignup.js"),
     ]);
 
-    const [sales, refunded, affCommission, ambCommission, joinFees, wdFees, liabilities, paystack] =
+    const [sales, refunded, affCommission, ambCommission, joinFees, wdFees, liabilities, paystack, recentSettlements] =
       await Promise.all([
         Payment.aggregate([
           { $match: { status: "SUCCESS" } },
@@ -179,6 +179,13 @@ export const adminFinance = async (req, res) => {
           { $group: { _id: null, total: { $sum: "$balance" } } },
         ]),
         getPaystackAccountSnapshot(),
+        Withdrawal.find({
+          status: { $in: ["APPROVED", "PAID", "FAILED"] },
+        })
+          .sort({ updatedAt: -1 })
+          .limit(8)
+          .select("amount transferFee netAmount status bankDetails paystackReference approvedAt failureReason createdAt updatedAt")
+          .lean(),
       ]);
 
     const s = sales[0] || {};
@@ -233,6 +240,19 @@ export const adminFinance = async (req, res) => {
           (refunded[0]?.amount || 0),
       },
       paystack,
+      settlements: (recentSettlements || []).map((settlement) => ({
+        id: settlement._id,
+        requestedAmount: settlement.amount || 0,
+        transferFee: settlement.transferFee || 0,
+        amountToBank: settlement.netAmount ?? settlement.amount ?? 0,
+        status: settlement.status,
+        bankName: settlement.bankDetails?.bankName || "",
+        accountName: settlement.bankDetails?.accountName || "",
+        accountLast4: String(settlement.bankDetails?.accountNumber || "").slice(-4),
+        paystackReference: settlement.paystackReference || "",
+        approvedAt: settlement.approvedAt || settlement.updatedAt || settlement.createdAt,
+        failureReason: settlement.failureReason || "",
+      })),
     });
   } catch (err) {
     console.error("ADMIN FINANCE ERROR:", err);

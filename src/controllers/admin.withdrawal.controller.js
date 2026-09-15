@@ -11,6 +11,7 @@ export const getAllWithdrawals = async (req, res) => {
   try {
     const withdrawals = await Withdrawal.find()
       .populate("organizer", "name email")
+      .populate("processedBy", "name email")
       .sort("-createdAt");
 
     res.json(withdrawals);
