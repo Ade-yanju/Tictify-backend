@@ -23,7 +23,7 @@ const PUBLIC_API =
   process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
 
 /* ── Async payout verdicts from Paystack ──────────────────────
-   transfer.success  → confirm the withdrawal as PAID
+   transfer.success  → confirm the withdrawal as SUCCESS
    transfer.failed / transfer.reversed → mark FAILED and return
    the held money to the organizer's wallet (exactly once). */
 async function handleTransferEvent(payload, res) {
@@ -36,9 +36,9 @@ async function handleTransferEvent(payload, res) {
 
     if (payload.event === "transfer.success") {
       const withdrawal = await Withdrawal.findOneAndUpdate(
-        { paystackReference: reference, status: { $in: ["APPROVED"] } },
+        { paystackReference: reference, status: { $in: ["PROCESSING", "APPROVED"] } },
         {
-          status: "PAID",
+          status: "SUCCESS",
           paidAt: new Date(),
           paystackTransferStatus: payload?.data?.status || "success",
         },
@@ -58,12 +58,12 @@ async function handleTransferEvent(payload, res) {
       payload.event === "transfer.failed" ||
       payload.event === "transfer.reversed"
     ) {
-      /* Atomic claim: only flip APPROVED → FAILED once,
+      /* Atomic claim: only flip PROCESSING → FAILED once,
          so a duplicate webhook can never double-refund */
       const withdrawal = await Withdrawal.findOneAndUpdate(
         {
           paystackReference: reference,
-          status: { $in: ["APPROVED"] },
+          status: { $in: ["PROCESSING", "APPROVED"] },
         },
         {
           status: "FAILED",
@@ -174,13 +174,21 @@ export const handlePaymentWebhook = async (req, res) => {
     if (!signature) {
       return res.status(400).send("Missing signature");
     }
+    if (!process.env.PAYSTACK_SECRET_KEY) {
+      return res.status(503).send("Webhook unavailable");
+    }
 
     const expectedSignature = crypto
       .createHmac("sha512", process.env.PAYSTACK_SECRET_KEY)
       .update(req.body) // raw buffer — must be raw, not parsed
       .digest("hex");
 
-    if (signature !== expectedSignature) {
+    const suppliedSignature = Buffer.from(String(signature), "utf8");
+    const expectedSignatureBuffer = Buffer.from(expectedSignature, "utf8");
+    if (
+      suppliedSignature.length !== expectedSignatureBuffer.length ||
+      !crypto.timingSafeEqual(suppliedSignature, expectedSignatureBuffer)
+    ) {
       console.error("❌ Invalid Paystack signature");
       return res.status(401).send("Invalid signature");
     }

@@ -1,5 +1,6 @@
-import dotenv from "dotenv";
-dotenv.config();
+/* Load .env before any imported service reads provider configuration. In ESM,
+   static imports are evaluated before the index module body runs. */
+import "dotenv/config";
 
 import express from "express";
 import mongoose from "mongoose";
@@ -70,7 +71,7 @@ app.use("/api/webhooks", express.raw({ type: "application/json" }));
 app.use("/api/payments/webhook", express.raw({ type: "application/json" }));
 app.use("/api/whatsapp/webhook", express.raw({ type: "application/json" }));
 
-app.use(express.json());
+app.use(express.json({ limit: "1mb" }));
 
 /* Version-stamped health check — proves which build is serving */
 app.get("/api/health", (req, res) =>

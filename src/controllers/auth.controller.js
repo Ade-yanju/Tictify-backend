@@ -226,7 +226,7 @@ export const login = async (req, res) => {
     const { password } = req.body;
     const email = String(req.body.email || "").trim().toLowerCase();
 
-    const user = await User.findOne({ email, isActive: true });
+    const user = await User.findOne({ email, isActive: true }).select("+passwordHash +verifyOtpHash +verifyOtpExpires +verifyOtpAttempts");
     if (!user) {
       return res.status(401).json({ message: "Invalid credentials" });
     }
@@ -298,7 +298,7 @@ export const verifyEmail = async (req, res) => {
         .json({ message: "Enter the 6-digit code from your email" });
     }
 
-    const user = await User.findOne({ email, isActive: true });
+    const user = await User.findOne({ email, isActive: true }).select("+verifyOtpHash +verifyOtpExpires +verifyOtpAttempts");
     if (!user || user.emailVerified !== false) {
       return res
         .status(400)
@@ -379,7 +379,7 @@ export const resendVerification = async (req, res) => {
       return res.status(400).json({ message: "A valid email is required" });
     }
 
-    const user = await User.findOne({ email, isActive: true });
+    const user = await User.findOne({ email, isActive: true }).select("+verifyOtpHash +verifyOtpExpires +verifyOtpAttempts");
     if (user && user.emailVerified === false) {
       const otp = setVerifyOtp(user); // fresh code, attempts reset
       await user.save();
@@ -416,7 +416,7 @@ export const forgotPassword = async (req, res) => {
       return res.status(400).json({ message: "A valid email is required" });
     }
 
-    const user = await User.findOne({ email, isActive: true });
+    const user = await User.findOne({ email, isActive: true }).select("+resetTokenHash +resetTokenExp");
     if (user) {
       const token = crypto.randomBytes(32).toString("hex");
       user.resetTokenHash = crypto.createHash("sha256").update(token).digest("hex");
@@ -460,7 +460,7 @@ export const resetPassword = async (req, res) => {
     const user = await User.findOne({
       resetTokenHash: tokenHash,
       resetTokenExp: { $gt: new Date() },
-    });
+    }).select("+resetTokenHash +resetTokenExp");
     if (!user) {
       return res.status(400).json({
         message: "This reset link is invalid or has expired. Request a new one.",

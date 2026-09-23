@@ -11,7 +11,7 @@ const userSchema = new mongoose.Schema(
       lowercase: true,
     },
 
-    passwordHash: { type: String, required: true },
+    passwordHash: { type: String, required: true, select: false },
 
     /* WhatsApp number — digits only, country code, no "+" (see
        utils/phone.js normalizeWhatsApp). This is how an organizer is
@@ -52,16 +52,16 @@ const userSchema = new mongoose.Schema(
     referralCode: { type: String, uppercase: true, unique: true, sparse: true, index: true },
 
     /* Password reset (forgot-password flow) */
-    resetTokenHash: String,
-    resetTokenExp: Date,
+    resetTokenHash: { type: String, select: false },
+    resetTokenExp: { type: Date, select: false },
 
     /* Email verification (OTP at signup). Default TRUE so every
        existing account is grandfathered — only accounts explicitly
        created with emailVerified:false are gated at login. */
     emailVerified: { type: Boolean, default: true },
-    verifyOtpHash: String,
-    verifyOtpExpires: Date,
-    verifyOtpAttempts: { type: Number, default: 0 },
+    verifyOtpHash: { type: String, select: false },
+    verifyOtpExpires: { type: Date, select: false },
+    verifyOtpAttempts: { type: Number, default: 0, select: false },
   },
   { timestamps: true }
 );

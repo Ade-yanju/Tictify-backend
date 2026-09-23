@@ -18,11 +18,16 @@ const MIN_WITHDRAWAL = 500; // ₦
 const MAX_WITHDRAWAL = 5_000_000; // ₦ sanity ceiling per request
 const PAYOUT_RETRY_DELAY_MS = 10 * 60 * 1000;
 
+function canonicalWithdrawalStatus(status) {
+  return status === "APPROVED" ? "PROCESSING" : status === "PAID" ? "SUCCESS" : status;
+}
+
 function organizerStatusMessage(withdrawal) {
-  switch (withdrawal?.status) {
-    case "PAID":
+  const status = canonicalWithdrawalStatus(withdrawal?.status);
+  switch (status) {
+    case "SUCCESS":
       return "Your withdrawal has been completed and sent to your bank.";
-    case "APPROVED":
+    case "PROCESSING":
       return "Your withdrawal has been sent for processing. You do not need to do anything else.";
     case "FAILED":
       return "We could not complete this withdrawal. The funds have been returned to your wallet.";
@@ -41,7 +46,7 @@ function organizerStatusMessage(withdrawal) {
 function organizerWithdrawalView(withdrawal) {
   return {
     id: String(withdrawal._id),
-    status: withdrawal.status,
+    status: canonicalWithdrawalStatus(withdrawal.status),
     amount: withdrawal.amount,
     transferFee: withdrawal.transferFee || 0,
     netAmount: withdrawal.netAmount ?? withdrawal.amount,
@@ -69,7 +74,7 @@ function queueWithdrawal(withdrawal, category, reason) {
    1. Strictly validate amount + bank details
    2. Atomically HOLD the funds (balance can never go
       negative, races can never double-spend)
-   3. Create a PENDING request for admin review
+   3. Create a request for automatic payout
 ===================================================== */
 export const requestWithdrawal = async (req, res) => {
   const userId = req.user.id;
@@ -88,6 +93,14 @@ export const requestWithdrawal = async (req, res) => {
     if (amount > MAX_WITHDRAWAL) {
       return res.status(400).json({
         message: `Maximum per request is ₦${MAX_WITHDRAWAL.toLocaleString()}`,
+      });
+    }
+
+    /* Paystack is the only payout path. Never create a held/manual request
+       that an administrator would need to approve later. */
+    if (!paystackConfigured) {
+      return res.status(503).json({
+        message: "Withdrawals are temporarily unavailable. Please try again later.",
       });
     }
 
@@ -136,7 +149,7 @@ export const requestWithdrawal = async (req, res) => {
     /* ── 3. One pending request at a time ── */
     const pending = await Withdrawal.findOne({
       organizer: userId,
-      status: { $in: ["PENDING", "APPROVED"] },
+      status: { $in: ["PENDING", "PROCESSING", "APPROVED"] },
     });
     if (pending) {
       return res.status(409).json({
@@ -190,7 +203,7 @@ export const requestWithdrawal = async (req, res) => {
     const usedBefore = await Withdrawal.findOne({
       organizer: userId,
       _id: { $ne: withdrawal._id },
-      status: { $in: ["PENDING", "APPROVED", "PAID"] },
+      status: { $in: ["PENDING", "PROCESSING", "APPROVED", "SUCCESS", "PAID"] },
       "bankDetails.accountNumber": accountNumber,
     });
 
@@ -233,7 +246,7 @@ export const requestWithdrawal = async (req, res) => {
 
 /* =====================================================
    CONFIRM WITHDRAWAL — verifies the emailed code, THEN
-   holds the funds and (in instant mode) fires the payout
+   holds the funds and fires the payout
 ===================================================== */
 export const confirmWithdrawal = async (req, res) => {
   try {
@@ -249,7 +262,7 @@ export const confirmWithdrawal = async (req, res) => {
       _id: withdrawalId,
       organizer: userId,
       status: "AWAITING_OTP",
-    });
+    }).select("+otpHash +otpExpires +otpAttempts");
     if (!withdrawal) {
       return res.status(404).json({ message: "No withdrawal awaiting confirmation" });
     }
@@ -301,8 +314,11 @@ export const confirmWithdrawal = async (req, res) => {
       description: `Withdrawal — ₦${withdrawal.netAmount.toLocaleString()} to ${bd.bankName} ····${bd.accountNumber.slice(-4)} (₦${withdrawal.transferFee} bank transfer fee)`,
     });
 
-    /* ── INSTANT PAYOUT (AUTO_APPROVE_WITHDRAWALS=true) ── */
-    if (process.env.AUTO_APPROVE_WITHDRAWALS === "true" && paystackConfigured) {
+    /* ── AUTOMATIC PAYOUT ──
+       There is no administrator approval step. Once the account OTP is
+       confirmed, Paystack is called immediately; a provider balance/API
+       issue moves the request to the automatic retry queue. */
+    if (paystackConfigured) {
       const payAmount = withdrawal.netAmount ?? withdrawal.amount;
       const needed = payAmount + paystackTransferCharge(payAmount);
       const available = await getAvailableBalance();
@@ -331,8 +347,8 @@ export const confirmWithdrawal = async (req, res) => {
           recipientCode: withdrawal.paystackRecipientCode,
         });
 
-        // Live Paystack transfers are asynchronous; the webhook confirms PAID.
-        withdrawal.status = "APPROVED";
+        // Live Paystack transfers are asynchronous; the webhook confirms SUCCESS.
+        withdrawal.status = "PROCESSING";
         withdrawal.paystackReference = payout.reference;
         withdrawal.paystackTransferCode = payout.transferCode;
         withdrawal.paystackTransferStatus = payout.status;
@@ -346,7 +362,7 @@ export const confirmWithdrawal = async (req, res) => {
 
         return res.json({
           message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} has been sent for processing. You do not need to do anything else.`,
-          status: "APPROVED",
+          status: "PROCESSING",
         });
       } catch (paystackErr) {
         /* Payout couldn't start (usually the T+1 settlement gap) —
@@ -369,9 +385,12 @@ export const confirmWithdrawal = async (req, res) => {
       });
     }
 
-    return res.json({
-      message: `Confirmed! You'll receive ₦${withdrawal.netAmount.toLocaleString()} once processed.`,
-      status: "PENDING",
+    /* Configuration cannot normally disappear between request and confirm,
+       but fail closed if it does rather than leaving a manual payout behind. */
+    withdrawal.status = "EXPIRED";
+    await withdrawal.save();
+    return res.status(503).json({
+      message: "Withdrawals are temporarily unavailable. Please try again later.",
     });
   } catch (err) {
     console.error("CONFIRM WITHDRAWAL ERROR:", err);

@@ -15,35 +15,3 @@ export const getWallet = async (req, res) => {
   }
 };
 
-/* ── POST /organizer/withdraw ── */
-export const withdraw = async (req, res) => {
-  try {
-    const { amount } = req.body;
-
-    if (!amount || amount <= 0) {
-      return res.status(400).json({ message: "Invalid withdrawal amount" });
-    }
-
-    const wallet = await Wallet.findOne({ organizer: req.user.id });
-    if (!wallet) {
-      return res.status(404).json({ message: "Wallet not found" });
-    }
-
-    if (wallet.balance < amount) {
-      return res.status(400).json({ message: "Insufficient balance" });
-    }
-
-    wallet.balance -= amount;
-    wallet.totalWithdrawn += amount;
-    await wallet.save();
-
-    res.json({
-      message: "Withdrawal successful",
-      newBalance: wallet.balance,
-      totalWithdrawn: wallet.totalWithdrawn,
-    });
-  } catch (err) {
-    console.error("WITHDRAW ERROR:", err);
-    res.status(500).json({ message: "Withdrawal failed" });
-  }
-};

@@ -6,12 +6,12 @@
    sits in PENDING with the organizer's funds already held.
    This sweep runs every few minutes and pays each one out
    the moment the settled balance can cover it. Admin
-   approval remains as a manual override only.
+   dashboard is monitoring-only; queued payouts retry automatically.
 
    Money safety:
    - The wallet hold happened at OTP confirmation; this
      never touches wallet.balance.
-   - Atomic PENDING → APPROVED claim means the sweep and an
+   - Atomic PENDING → PROCESSING claim means concurrent sweeps cannot
      admin can never both pay the same withdrawal.
    - A payout the Paystack API rejects reverts to PENDING
      for the next cycle; an async transfer.failed webhook
@@ -48,7 +48,7 @@ function organizerQueueEmail(withdrawal, payAmount) {
 
 export async function processPendingPayouts() {
   if (sweeping) return; // a slow sweep must not overlap the next tick
-  if (!paystackConfigured || process.env.AUTO_APPROVE_WITHDRAWALS !== "true")
+  if (!paystackConfigured)
     return;
 
   sweeping = true;
@@ -104,7 +104,7 @@ export async function processPendingPayouts() {
       const claimed = await Withdrawal.findOneAndUpdate(
         { _id: w._id, status: "PENDING" },
         {
-          status: "APPROVED",
+          status: "PROCESSING",
           approvedAt: new Date(),
           lastAttemptAt: new Date(),
         },
@@ -121,7 +121,7 @@ export async function processPendingPayouts() {
           recipientCode: w.paystackRecipientCode,
         });
 
-        claimed.status = "APPROVED";
+        claimed.status = "PROCESSING";
         claimed.paystackReference = payout.reference;
         claimed.paystackTransferCode = payout.transferCode;
         claimed.paystackTransferStatus = payout.status;

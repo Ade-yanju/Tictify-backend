@@ -49,7 +49,7 @@ router.post("/join", joinLimiter, async (req, res) => {
     if (!PAYSTACK_KEY || !PAYSTACK_KEY.startsWith("sk_"))
       return res.status(503).json({ message: "Payments are not configured yet" });
 
-    const existingUser = await User.findOne({ email });
+    const existingUser = await User.findOne({ email }).select("+passwordHash");
     if (existingUser) {
       if (existingUser.affiliateCode) {
         return res.status(409).json({

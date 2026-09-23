@@ -25,7 +25,7 @@ const withdrawalSchema = new mongoose.Schema(
 
     status: {
       type: String,
-      enum: ["AWAITING_OTP", "PENDING", "APPROVED", "REJECTED", "PAID", "FAILED", "EXPIRED"],
+      enum: ["AWAITING_OTP", "PENDING", "PROCESSING", "SUCCESS", "FAILED", "REJECTED", "EXPIRED", "APPROVED", "PAID"],
       default: "PENDING",
     },
 
@@ -39,8 +39,8 @@ const withdrawalSchema = new mongoose.Schema(
 
     /* Withdrawal confirmation (anti-fraud): a 6-digit code emailed to
        the ACCOUNT email must be entered before any money moves */
-    otpHash: String,
-    otpExpires: Date,
+    otpHash: { type: String, select: false },
+    otpExpires: { type: Date, select: false },
     otpAttempts: { type: Number, default: 0 }, // set when Paystack reports transfer.failed/reversed
 
     bankDetails: {
