@@ -39,7 +39,13 @@ export const getAdminAffiliates = async (req, res) => {
     const [sales, wallets, membership] = await Promise.all([
       /* ONE aggregate for every affiliate's ticket sales */
       Payment.aggregate([
-        { $match: { promoter: { $in: codes }, status: "SUCCESS" } },
+        {
+          $match: {
+            promoter: { $in: codes },
+            status: "SUCCESS",
+            countsAsTicketSale: { $ne: false },
+          },
+        },
         {
           $group: {
             _id: "$promoter",

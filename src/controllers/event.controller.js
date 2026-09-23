@@ -52,6 +52,9 @@ export const createEvent = async (req, res) => {
       ticketTypes,
       status = "DRAFT",
       banner,
+      installmentsEnabled = false,
+      installmentMinimumPercent = 30,
+      installmentDueAt,
     } = req.body;
 
     if (!req.user) {
@@ -78,6 +81,22 @@ export const createEvent = async (req, res) => {
       return res
         .status(400)
         .json({ message: "Event end time must be after start time" });
+    }
+
+    const allowInstallments = Boolean(installmentsEnabled) &&
+      ticketTypes?.some((t) => Number(t?.price) > 0);
+    const minimumPercent = Math.min(90, Math.max(10, parseInt(installmentMinimumPercent) || 30));
+    let installmentDeadline = null;
+    if (allowInstallments) {
+      installmentDeadline = installmentDueAt
+        ? new Date(installmentDueAt)
+        : new Date(new Date(date).getTime() - 24 * 60 * 60 * 1000);
+      if (isNaN(installmentDeadline.getTime()) || installmentDeadline <= new Date()) {
+        return res.status(400).json({ message: "Installment deadline must be in the future" });
+      }
+      if (installmentDeadline > new Date(date)) {
+        return res.status(400).json({ message: "Installment deadline must be before the event starts" });
+      }
     }
 
     /* Sales window — absent means "sell until the event ends" */
@@ -121,7 +140,9 @@ export const createEvent = async (req, res) => {
       ticketTypes: ticketTypes.map((t) => ({
         ...t,
         sold: 0,
+        reserved: 0,
       })),
+      reservedTickets: 0,
       status,
       banner,
       category: categoryAliases[req.body.category] || req.body.category || "Other",
@@ -129,6 +150,9 @@ export const createEvent = async (req, res) => {
       bannerFit: req.body.bannerFit === "contain" ? "contain" : "cover",
       affiliatesEnabled: Boolean(req.body.affiliatesEnabled),
       affiliatePercent: Math.min(50, Math.max(1, parseInt(req.body.affiliatePercent) || 15)),
+      installmentsEnabled: allowInstallments,
+      installmentMinimumPercent: minimumPercent,
+      installmentDueAt: installmentDeadline,
     });
 
     // 🔔 New LIVE event → push alert to subscribed guests (fire-and-forget)
@@ -155,7 +179,7 @@ export const duplicateEvent = async (req, res) => {
     if (!source) return res.status(404).json({ message: "Event not found" });
     const id = new mongoose.Types.ObjectId();
     const start = new Date(Date.now() + 86400000); const end = new Date(Date.now() + 90000000);
-    const event = await Event.create({ ...source, _id: id, slug: buildEventSlug(`${source.title} Copy`, id), title: `${source.title} Copy`, status: "DRAFT", date: start, endDate: end, salesEndAt: end, ticketTypes: (source.ticketTypes || []).map(t => ({ ...t, sold: 0 })) });
+    const event = await Event.create({ ...source, _id: id, slug: buildEventSlug(`${source.title} Copy`, id), title: `${source.title} Copy`, status: "DRAFT", date: start, endDate: end, salesEndAt: end, installmentsEnabled: false, installmentDueAt: undefined, reservedTickets: 0, ticketTypes: (source.ticketTypes || []).map(t => ({ ...t, sold: 0, reserved: 0 })) });
     res.status(201).json(event);
   } catch (err) { console.error("DUPLICATE EVENT ERROR:", err); res.status(500).json({ message: "Could not duplicate event" }); }
 };
@@ -234,10 +258,7 @@ export const getPublicEvents = async (_, res) => {
     /**
      * 3️⃣ REMOVE SOLD-OUT EVENTS
      */
-    const availableEvents = events.filter((event) => {
-      const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
-      return sold < event.capacity;
-    });
+    const availableEvents = events.filter((event) => !computeAvailability(event).soldOut);
 
     /* Cards show availability inline — attach sold/remaining here so the
        list never needs an N+1 fetch per event. Additive: every existing
@@ -245,7 +266,7 @@ export const getPublicEvents = async (_, res) => {
     res.json(
       availableEvents.map((event) => {
         const a = computeAvailability(event);
-        return { ...event.toObject(), sold: a.totalSold, remaining: a.remaining };
+        return { ...event.toObject(), sold: a.totalSold, reserved: a.totalReserved, remaining: a.remaining };
       }),
     );
   } catch (err) {
@@ -273,20 +294,21 @@ export const getEventById = async (req, res) => {
     }
 
     const sold = event.ticketTypes.reduce((sum, t) => sum + (t.sold || 0), 0);
+    const availability = computeAvailability(event);
     const closeAt = salesCloseAt(event);
 
     res.json({
       ...event.toObject(),
-      isSoldOut: sold >= event.capacity,
+      isSoldOut: availability.soldOut,
       /* Matches createPaymentSession's guard exactly — the page never
          promises a sale the checkout will refuse. */
-      isSelling: event.status === "LIVE" && now < closeAt && sold < event.capacity,
+      isSelling: event.status === "LIVE" && now < closeAt && !availability.soldOut,
       salesEndAt: closeAt,
       salesClosed: now >= closeAt,
       /* Sold/remaining per tier AND for the event, computed with the
          exact same arithmetic createPaymentSession uses to refuse a
          purchase — so the page can never promise what checkout denies. */
-      availability: computeAvailability(event),
+      availability,
     });
   } catch (err) {
     console.error("GET EVENT ERROR:", err);
@@ -410,12 +432,25 @@ export const adminCancelEvent = async (req, res) => {
         .json({ message: "Event not found or already ended/cancelled" });
     }
 
-    const [{ default: Payment }, { default: Wallet }, { default: WalletTransaction }] =
+    const [{ default: Payment }, { default: Wallet }, { default: WalletTransaction }, { default: InstallmentPlan }, { releasePlanReservation }] =
       await Promise.all([
         import("../models/Payment.js"),
         import("../models/Wallet.js"),
         import("../models/WalletTransaction.js"),
+        import("../models/InstallmentPlan.js"),
+        import("../services/installment.service.js"),
       ]);
+
+    const activePlans = await InstallmentPlan.find({
+      event: event._id,
+      status: { $in: ["RESERVED", "PARTIALLY_PAID"] },
+    });
+    for (const plan of activePlans) {
+      await releasePlanReservation(plan);
+      plan.status = "CANCELLED";
+      plan.reservationReleasedAt = new Date();
+      await plan.save();
+    }
 
     /* Revenue this event put into the organizer's wallet */
     const agg = await Payment.aggregate([
@@ -531,10 +566,40 @@ export const updateEvent = async (req, res) => {
     if (b.affiliatePercent != null) {
       event.affiliatePercent = Math.min(50, Math.max(1, parseInt(b.affiliatePercent) || 15));
     }
+    if (b.installmentsEnabled != null) {
+      const wantsInstallments = Boolean(b.installmentsEnabled) &&
+        event.ticketTypes.some((t) => Number(t.price) > 0);
+      event.installmentsEnabled = wantsInstallments;
+    }
+    if (b.installmentMinimumPercent != null) {
+      event.installmentMinimumPercent = Math.min(90, Math.max(10, parseInt(b.installmentMinimumPercent) || 30));
+    }
     if (b.date) event.date = new Date(b.date);
     if (b.endDate) event.endDate = new Date(b.endDate);
     if (event.endDate <= event.date) {
       return res.status(400).json({ message: "End time must be after start time" });
+    }
+    if (b.installmentDueAt != null) {
+      if (b.installmentDueAt === "") {
+        event.installmentDueAt = undefined;
+      } else {
+        const deadline = new Date(b.installmentDueAt);
+        if (isNaN(deadline.getTime()) || deadline <= new Date() || deadline > event.date) {
+          return res.status(400).json({ message: "Installment deadline must be in the future and before the event starts" });
+        }
+        event.installmentDueAt = deadline;
+      }
+    }
+    if (event.installmentsEnabled && event.ticketTypes.every((t) => Number(t.price) <= 0)) {
+      event.installmentsEnabled = false;
+      event.installmentDueAt = undefined;
+    }
+    if (event.installmentsEnabled && !event.installmentDueAt) {
+      const fallbackDeadline = new Date(event.date.getTime() - 24 * 60 * 60 * 1000);
+      if (fallbackDeadline <= new Date()) {
+        return res.status(400).json({ message: "Set an installment deadline before enabling installments" });
+      }
+      event.installmentDueAt = fallbackDeadline;
     }
 
     /* Sales window — validated against the endDate as it stands AFTER
@@ -551,11 +616,12 @@ export const updateEvent = async (req, res) => {
     }
 
     const totalSold = event.ticketTypes.reduce((s, t) => s + (t.sold || 0), 0);
+    const totalReserved = event.ticketTypes.reduce((s, t) => s + (t.reserved || 0), 0);
     if (b.capacity != null) {
       const cap = parseInt(b.capacity);
-      if (!Number.isInteger(cap) || cap < Math.max(1, totalSold)) {
+      if (!Number.isInteger(cap) || cap < Math.max(1, totalSold + totalReserved)) {
         return res.status(400).json({
-          message: `Capacity can't be below tickets already sold (${totalSold})`,
+          message: `Capacity can't be below tickets already sold or reserved (${totalSold + totalReserved})`,
         });
       }
       event.capacity = cap;
@@ -569,7 +635,7 @@ export const updateEvent = async (req, res) => {
         if (edit.price != null && Number(edit.price) >= 0) tier.price = Number(edit.price);
         if (edit.quantity != null) {
           const q = parseInt(edit.quantity);
-          if (Number.isInteger(q) && q >= (tier.sold || 0)) tier.quantity = q;
+          if (Number.isInteger(q) && q >= (tier.sold || 0) + (tier.reserved || 0)) tier.quantity = q;
         }
         if (edit.earlyBirdPrice === "" || edit.earlyBirdPrice === null) {
           tier.earlyBirdPrice = undefined;
@@ -579,6 +645,11 @@ export const updateEvent = async (req, res) => {
           if (edit.earlyBirdUntil) tier.earlyBirdUntil = new Date(edit.earlyBirdUntil);
         }
       }
+    }
+
+    if (event.installmentsEnabled && event.ticketTypes.every((t) => Number(t.price) <= 0)) {
+      event.installmentsEnabled = false;
+      event.installmentDueAt = undefined;
     }
 
     await event.save();

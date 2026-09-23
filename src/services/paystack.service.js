@@ -47,6 +47,29 @@ async function paystackGet(path, query = {}) {
   }
 }
 
+function paystackError(message, category = "TRANSIENT") {
+  const error = new Error(message || "Paystack request failed");
+  error.category = category;
+  return error;
+}
+
+function classifyTransferError(message = "") {
+  const text = String(message).toLowerCase();
+  if (/duplicate|already exists|unique reference|reference already/.test(text)) {
+    return "RECONCILIATION_REQUIRED";
+  }
+  if (/insufficient|balance|funds|settlement/.test(text)) {
+    return "PAYSTACK_BALANCE_LOW";
+  }
+  if (/otp|one[- ]time password|transfer confirmation/.test(text)) {
+    return "TRANSFER_OTP_REQUIRED";
+  }
+  if (/recipient|account|bank|nuban/.test(text)) {
+    return "INVALID_RECIPIENT";
+  }
+  return "TRANSIENT";
+}
+
 /* Withdrawal fee — flat ₦100 charged to the withdrawer:
    ₦50 stamp duty + ₦50 platform/maintenance fee.
    (Covers Paystack's ₦10-₦50 transfer cost; the rest is margin.)
@@ -76,6 +99,34 @@ export async function getAvailableBalance() {
   } catch {
     return null;
   }
+}
+
+/* Bank codes and account-name resolution are also provider-owned data. Keep
+   both behind the backend so the browser never becomes the authority for a
+   bank code or for whether an account can receive money. */
+export async function getPaystackBanks() {
+  if (!paystackConfigured) return [];
+  const body = await paystackGet("/bank", {
+    country: "nigeria",
+    currency: "NGN",
+    perPage: 100,
+  });
+  return (body.data || [])
+    .filter((bank) => bank?.active !== false && bank?.code && bank?.name)
+    .map((bank) => ({
+      code: String(bank.code),
+      name: String(bank.name),
+    }))
+    .sort((a, b) => a.name.localeCompare(b.name));
+}
+
+export async function resolvePaystackAccount({ accountNumber, bankCode }) {
+  if (!paystackConfigured) return null;
+  const body = await paystackGet("/bank/resolve", {
+    account_number: accountNumber,
+    bank_code: bankCode,
+  });
+  return body.data || null;
 }
 
 /* Live Paystack account view for admin reporting. The ledger endpoint is
@@ -161,19 +212,51 @@ export async function getPaystackAccountSnapshot({ perPage = 20 } = {}) {
   return snapshot;
 }
 
-async function verifyTransfer(reference, headers) {
+/*
+ * Reconcile an ambiguous transfer before retrying it.
+ *
+ * Paystack documents GET /transfer/:id_or_code, not the old
+ * /transfer/verify/:reference path. A transfer reference is not guaranteed
+ * to work as the path identifier, so the list fallback also searches by
+ * reference. This is what prevents a timeout/duplicate-reference response
+ * from creating a second payout attempt.
+ */
+async function findTransferByReference(reference) {
   if (!reference) return null;
+
   try {
-    const res = await fetch(
-      `https://api.paystack.co/transfer/verify/${encodeURIComponent(reference)}`,
-      { headers },
+    const direct = await paystackGet(
+      `/transfer/${encodeURIComponent(reference)}`,
     );
-    const body = await res.json();
-    if (body.status && body.data?.reference === reference) return body.data;
+    if (direct.data?.reference === reference) return direct.data;
   } catch {
-    // The original transfer error is more useful to the retry queue.
+    // Fall through to the documented transfer list search.
   }
+
+  try {
+    // The transfer was just initiated, so it should be near the first page.
+    // A bounded search keeps a broken Paystack response from blocking payout.
+    for (let page = 1; page <= 3; page += 1) {
+      const body = await paystackGet("/transfer", {
+        perPage: 100,
+        page,
+      });
+      const match = (body.data || []).find(
+        (transfer) => transfer.reference === reference,
+      );
+      if (match) return match;
+      if ((body.data || []).length < 100) break;
+    }
+  } catch {
+    // The caller will retry the same idempotent reference later.
+  }
+
   return null;
+}
+
+function nextTransferReference(reference) {
+  const suffix = Date.now().toString(36);
+  return `${String(reference || "wd")}_${suffix}`.slice(0, 50);
 }
 
 /* Create (or reuse) a transfer recipient, then fire the transfer.
@@ -181,7 +264,7 @@ async function verifyTransfer(reference, headers) {
    human-readable message. */
 export async function payoutToBank({ amount, bankDetails, reason, reference, recipientCode }) {
   if (!paystackConfigured) {
-    throw new Error("Paystack is not configured");
+    throw paystackError("Paystack is not configured", "PAYSTACK_NOT_CONFIGURED");
   }
 
   const headers = {
@@ -192,42 +275,54 @@ export async function payoutToBank({ amount, bankDetails, reason, reference, rec
   /* 1. Recipient */
   let recipient = recipientCode ? { data: { recipient_code: recipientCode } } : null;
   if (!recipient) {
-    const recipientRes = await fetch("https://api.paystack.co/transferrecipient", {
-      method: "POST",
-      headers,
-      body: JSON.stringify({
-        type: "nuban",
-        name: bankDetails.accountName,
-        account_number: bankDetails.accountNumber,
-        bank_code: bankDetails.bankCode,
-        currency: "NGN",
-      }),
-    });
+    const recipientController = new AbortController();
+    const recipientTimeout = setTimeout(() => recipientController.abort(), 8_000);
+    let recipientRes;
+    try {
+      recipientRes = await fetch("https://api.paystack.co/transferrecipient", {
+        method: "POST",
+        headers,
+        signal: recipientController.signal,
+        body: JSON.stringify({
+          type: "nuban",
+          name: bankDetails.accountName,
+          account_number: bankDetails.accountNumber,
+          bank_code: bankDetails.bankCode,
+          currency: "NGN",
+        }),
+      });
+    } finally {
+      clearTimeout(recipientTimeout);
+    }
     recipient = await recipientRes.json();
     if (!recipient.status) {
-      throw new Error(recipient.message || "Bank account could not be verified");
+      throw paystackError(
+        recipient.message || "Bank account could not be verified",
+        "INVALID_RECIPIENT",
+      );
     }
   }
 
   /* 2. Transfer (amount in kobo) */
-  const transferRes = await fetch("https://api.paystack.co/transfer", {
-    method: "POST",
-    headers,
-    body: JSON.stringify({
-      source: "balance",
-      amount: Math.round(amount * 100),
-      recipient: recipient.data.recipient_code,
-      reason: reason || "Tictify payout",
-      ...(reference ? { reference } : {}),
-    }),
-  });
-  const transfer = await transferRes.json();
-  if (!transfer.status) {
-    // Common causes: transfers not enabled, insufficient Paystack balance,
-    // OTP required on transfers (must be disabled for automation)
-    // If the request timed out after Paystack accepted it, recover the
-    // existing transfer by reference instead of creating another payout.
-    const existing = await verifyTransfer(reference, headers);
+  const transferController = new AbortController();
+  const transferTimeout = setTimeout(() => transferController.abort(), 8_000);
+  let transferRes;
+  try {
+    transferRes = await fetch("https://api.paystack.co/transfer", {
+      method: "POST",
+      headers,
+      signal: transferController.signal,
+      body: JSON.stringify({
+        source: "balance",
+        amount: Math.round(amount * 100),
+        recipient: recipient.data.recipient_code,
+        reason: reason || "Tictify payout",
+        ...(reference ? { reference } : {}),
+      }),
+    });
+  } catch (error) {
+    /* A timeout is ambiguous: Paystack may have accepted the transfer. */
+    const existing = await findTransferByReference(reference);
     if (existing && ["pending", "success"].includes(existing.status)) {
       return {
         reference: existing.reference,
@@ -236,11 +331,60 @@ export async function payoutToBank({ amount, bankDetails, reason, reference, rec
         recipientCode: recipient.data.recipient_code,
       };
     }
-    throw new Error(transfer.message || "Transfer failed");
+    if (existing && ["failed", "reversed"].includes(existing.status)) {
+      // A confirmed failed/reversed transfer cannot be retried with its old
+      // unique reference. It moved no money, so a new idempotency key is safe.
+      return payoutToBank({
+        amount,
+        bankDetails,
+        reason,
+        reference: nextTransferReference(reference),
+        recipientCode: recipient.data.recipient_code,
+      });
+    }
+    throw paystackError(
+      error?.name === "AbortError"
+        ? "Paystack transfer response timed out"
+        : error?.message,
+      "RECONCILIATION_REQUIRED",
+    );
+  } finally {
+    clearTimeout(transferTimeout);
+  }
+  const transfer = await transferRes.json();
+  if (!transfer.status) {
+    // If the request was accepted but the response was lost, recover the
+    // existing transfer by its unique reference before any retry.
+    const existing = await findTransferByReference(reference);
+    if (existing && ["pending", "success"].includes(existing.status)) {
+      return {
+        reference: existing.reference,
+        transferCode: existing.transfer_code,
+        status: existing.status,
+        recipientCode: recipient.data.recipient_code,
+      };
+    }
+    if (existing && ["failed", "reversed"].includes(existing.status)) {
+      // The old reference is permanently consumed after a confirmed failure.
+      return payoutToBank({
+        amount,
+        bankDetails,
+        reason,
+        reference: nextTransferReference(reference),
+        recipientCode: recipient.data.recipient_code,
+      });
+    }
+    throw paystackError(
+      transfer.message || "Transfer failed",
+      classifyTransferError(transfer.message),
+    );
   }
 
   if (transfer.data?.status === "otp") {
-    throw new Error("Paystack transfer OTP is enabled; disable transfer confirmation in Paystack before going live");
+    throw paystackError(
+      "Paystack transfer OTP is enabled; disable transfer confirmation in Paystack before going live",
+      "TRANSFER_OTP_REQUIRED",
+    );
   }
 
   return {

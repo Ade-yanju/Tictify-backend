@@ -69,7 +69,18 @@ export const adminAnalytics = async (req, res) => {
           $group: {
             _id: "$event",
             revenue: { $sum: "$amount" },
-            sold: { $sum: { $ifNull: ["$quantity", 1] } },
+            sold: {
+              $sum: {
+                $cond: [
+                  { $or: [
+                    { $ne: ["$paymentType", "INSTALLMENT"] },
+                    { $eq: ["$countsAsTicketSale", true] },
+                  ] },
+                  { $ifNull: ["$quantity", 1] },
+                  0,
+                ],
+              },
+            },
           },
         },
         { $sort: { revenue: -1 } },
@@ -90,7 +101,18 @@ export const adminAnalytics = async (req, res) => {
           $group: {
             _id: "$organizer",
             revenue: { $sum: "$amount" },
-            sold: { $sum: { $ifNull: ["$quantity", 1] } },
+            sold: {
+              $sum: {
+                $cond: [
+                  { $or: [
+                    { $ne: ["$paymentType", "INSTALLMENT"] },
+                    { $eq: ["$countsAsTicketSale", true] },
+                  ] },
+                  { $ifNull: ["$quantity", 1] },
+                  0,
+                ],
+              },
+            },
           },
         },
         { $sort: { revenue: -1 } },
@@ -146,7 +168,18 @@ export const adminFinance = async (req, res) => {
               platformFees: { $sum: "$platformFee" },
               processingFees: { $sum: "$processingFee" },
               discountsGiven: { $sum: "$discountAmount" },
-              ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+              ticketsSold: {
+                $sum: {
+                  $cond: [
+                    { $or: [
+                      { $ne: ["$paymentType", "INSTALLMENT"] },
+                      { $eq: ["$countsAsTicketSale", true] },
+                    ] },
+                    { $ifNull: ["$quantity", 1] },
+                    0,
+                  ],
+                },
+              },
               orders: { $sum: 1 },
           } },
         ]),

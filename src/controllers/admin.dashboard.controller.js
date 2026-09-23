@@ -27,7 +27,18 @@ export const adminDashboard = async (req, res) => {
             _id: null,
             revenue: { $sum: "$amount" },            // everything guests paid
             platformFees: { $sum: "$platformFee" },  // Tictify's actual cut
-            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+            ticketsSold: {
+              $sum: {
+                $cond: [
+                  { $or: [
+                    { $ne: ["$paymentType", "INSTALLMENT"] },
+                    { $eq: ["$countsAsTicketSale", true] },
+                  ] },
+                  { $ifNull: ["$quantity", 1] },
+                  0,
+                ],
+              },
+            },
           },
         },
       ]),
@@ -50,7 +61,18 @@ export const adminDashboard = async (req, res) => {
         {
           $group: {
             _id: "$event",
-            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
+            ticketsSold: {
+              $sum: {
+                $cond: [
+                  { $or: [
+                    { $ne: ["$paymentType", "INSTALLMENT"] },
+                    { $eq: ["$countsAsTicketSale", true] },
+                  ] },
+                  { $ifNull: ["$quantity", 1] },
+                  0,
+                ],
+              },
+            },
             revenue: { $sum: "$amount" }, // gross — everything guests paid
             platformFees: { $sum: "$platformFee" }, // Tictify's cut
             /* carried so orphaned sales (deleted event) stay attributed */

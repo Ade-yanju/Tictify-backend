@@ -5,7 +5,6 @@ import Event from "../models/Event.js";
 import Ticket from "../models/Ticket.js";
 import User from "../models/User.js";
 import Wallet from "../models/Wallet.js";
-import WalletTransaction from "../models/WalletTransaction.js";
 import Payment from "../models/Payment.js";
 import Withdrawal from "../models/Withdrawal.js";
 import DiscountCode from "../models/DiscountCode.js";
@@ -22,7 +21,13 @@ import {
   effectivePrice,
   createPaymentSession,
 } from "../controllers/payment.controller.js";
-import { transferFee } from "./paystack.service.js";
+import {
+  requestWithdrawal,
+  confirmWithdrawal,
+  getWithdrawalStatus,
+} from "../controllers/withdrawal.controller.js";
+import { initiateInstallment } from "../controllers/installment.controller.js";
+import { getPaystackBanks } from "./paystack.service.js";
 import { resolveDiscount } from "../controllers/discount.controller.js";
 import { performScan, transferTicket } from "../controllers/ticket.controller.js";
 import { buildEventSlug, findEventByIdOrSlug, findEventByShortCode } from "../utils/resolveEvent.js";
@@ -60,6 +65,8 @@ const OTP_TTL_MS = 10 * 60 * 1000;
 const OTP_MAX_ATTEMPTS = 5;
 const MIN_WITHDRAWAL = 500;
 const MAX_WITHDRAWAL = 5_000_000;
+const BANK_PAGE_SIZE = 9;
+const BANK_MORE_ID = String(BANK_PAGE_SIZE + 1);
 const BANKS = [
   { code: "044", name: "Access Bank" },
   { code: "023", name: "Citibank Nigeria" },
@@ -213,6 +220,7 @@ const ORG_MENU_ROWS = [
   { id: "4", title: "➕ Create event", description: "Set up a new event from chat" },
   { id: "5", title: "🎫 Scan tickets", description: "Admit guests at the gate" },
   { id: "6", title: "🔓 Unlink this number", description: "Disconnect this WhatsApp" },
+  { id: "7", title: "🧾 Withdrawal status", description: "Track your latest payout" },
 ];
 
 const AFF_MENU_ROWS = [
@@ -256,6 +264,40 @@ async function setSession(session, state, data = {}) {
   session.data = promoter ? { ...data, promoter } : { ...data };
   session.markModified("data");
   await session.save();
+}
+
+/* Reuse the HTTP controllers from the bot instead of maintaining a second
+   withdrawal/installment implementation. The controllers only need a small
+   Express-shaped request/response object, so this adapter keeps all business
+   rules, wallet holds, Paystack checks, and safe messages in one place. */
+async function callJsonController(handler, { userId, body = {}, params = {} }) {
+  let statusCode = 200;
+  let payload;
+  const response = {
+    status(code) {
+      statusCode = code;
+      return this;
+    },
+    json(value) {
+      payload = value;
+      return this;
+    },
+    send(value) {
+      payload = value;
+      return this;
+    },
+  };
+
+  await handler(
+    {
+      user: { id: userId, _id: userId },
+      body,
+      params,
+    },
+    response,
+  );
+
+  return { statusCode, payload: payload || {} };
 }
 
 function clearOtpFields(session) {
@@ -467,6 +509,8 @@ export async function handleIncoming(phone, message, transport) {
         return await handleEvPrice(session, input, t, phone);
       case "EV_QTY":
         return await handleEvQty(session, input, t, phone);
+      case "EV_INSTALLMENT":
+        return await handleEvInstallment(session, input, t, phone);
       case "EV_BANNER":
         return await handleEvBanner(session, input, t, phone);
       case "EV_CONFIRM":
@@ -762,6 +806,9 @@ async function showEventDetail(session, event, t, phone, prefix = "") {
     eventTitle: event.title,
     tierNames: tiers.map((tier) => tier.name),
     tierPrices: tiers.map((tier) => effectivePrice(tier, now)),
+    installmentsEnabled: Boolean(event.installmentsEnabled),
+    installmentMinimumPercent: event.installmentMinimumPercent,
+    installmentDueAt: event.installmentDueAt,
   });
 
   const detail =
@@ -905,21 +952,83 @@ async function handleDiscount(session, input, t, phone) {
 /* ================= PAYMENT METHOD ================= */
 async function askPayMethod(session, t, phone, prefix = "") {
   const d = session.data || {};
+  const installmentOpen = d.installmentsEnabled &&
+    d.installmentDueAt &&
+    new Date(d.installmentDueAt) > new Date();
+  const methods = [
+    { id: "1", title: "💳 Card / link" },
+    { id: "2", title: "🏦 Bank transfer" },
+  ];
+  if (installmentOpen) {
+    methods.push({ id: "3", title: "🧾 Pay in installments" });
+  }
   return uiButtons(
     t,
     phone,
     `${prefix}💳 *How would you like to pay?*\n\n${d.qty} × ${d.tierName} — ${d.eventTitle}`,
-    [
-      { id: "1", title: "💳 Card / link" },
-      { id: "2", title: "🏦 Bank transfer" },
-    ],
+    methods,
   );
 }
 
 async function handlePayMethod(session, input, t, phone) {
   if (input === "1") return createAndReply(session, t, phone, "link");
   if (input === "2") return createAndReply(session, t, phone, "transfer");
+  if (input === "3") {
+    const d = session.data || {};
+    if (!d.installmentsEnabled || !d.installmentDueAt || new Date(d.installmentDueAt) <= new Date()) {
+      return askPayMethod(session, t, phone, "Installment payments are not available for this event.\n\n");
+    }
+    return createInstallmentAndReply(session, t, phone);
+  }
   return askPayMethod(session, t, phone);
+}
+
+async function createInstallmentAndReply(session, t, phone) {
+  const d = session.data || {};
+  const result = await callJsonController(initiateInstallment, {
+    userId: undefined,
+    body: {
+      eventId: d.eventId,
+      ticketType: d.tierName,
+      quantity: d.qty,
+      name: d.name,
+      email: d.email,
+      discountCode: d.discountCode,
+      promoter: d.promoter,
+      waPhone: phone,
+    },
+  });
+
+  if (result.statusCode >= 400) {
+    if (/discount/i.test(result.payload.message || "")) {
+      await setSession(session, "DISCOUNT", { ...d, discountCode: undefined });
+      return uiButtons(
+        t,
+        phone,
+        `❌ ${result.payload.message}.\n\nSend another code — or skip.`,
+        [{ id: "skip", title: "⏭️ Skip" }],
+      );
+    }
+    await setSession(session, "MENU", {});
+    return t.send(
+      phone,
+      `😕 Could not start the installment reservation: ${result.payload.message || "please try again"}.\n\nType *menu* to start over.`,
+    );
+  }
+
+  await setSession(session, "MENU", {});
+  return t.send(
+    phone,
+    `🧾 *Installment reservation started — ${d.eventTitle}*\n\n` +
+      `${d.qty} × ${d.tierName}\n` +
+      `Pay now: *${fmtNaira(result.payload.initialPayment)}*` +
+      `${result.payload.processingFee ? ` + ${fmtNaira(result.payload.processingFee)} processing fee` : ""}\n` +
+      `Remaining after this payment: *${fmtNaira(result.payload.amountRemaining - result.payload.initialPayment)}*\n` +
+      `Complete by: ${new Date(result.payload.dueAt).toLocaleString("en-NG")}\n\n` +
+      `👉 Pay the deposit securely here:\n${result.payload.paymentUrl}\n\n` +
+      `Your ticket stays reserved, but the QR ticket is issued only after the full balance is paid. ` +
+      `You can use this reservation link to make the next payment:\n${result.payload.planUrl}`,
+  );
 }
 
 /* order breakdown shared by the link and transfer replies */
@@ -1521,7 +1630,13 @@ async function handleOrgMenu(session, input, t, phone) {
       const [wallet, sales] = await Promise.all([
         Wallet.findOne({ organizer: orgId }).lean(),
         Payment.aggregate([
-          { $match: { organizer: orgId, status: "SUCCESS" } },
+          {
+            $match: {
+              organizer: orgId,
+              status: "SUCCESS",
+              countsAsTicketSale: { $ne: false },
+            },
+          },
           {
             $group: {
               _id: null,
@@ -1552,6 +1667,34 @@ async function handleOrgMenu(session, input, t, phone) {
         phone,
         `💸 *Withdraw funds*\n\nHow much do you want to withdraw? Minimum ${fmtNaira(MIN_WITHDRAWAL)}.\n\nSend the amount as a number, e.g. 25000.`,
       );
+
+    case "7": {
+      const latest = await Withdrawal.findOne({
+        organizer: session.organizerUser,
+      })
+        .sort({ createdAt: -1 })
+        .select("_id")
+        .lean();
+      if (!latest) return showOrgMenu(t, phone, "You have no withdrawals yet.\n\n");
+
+      const result = await callJsonController(getWithdrawalStatus, {
+        userId: session.organizerUser,
+        params: { withdrawalId: String(latest._id) },
+      });
+      if (result.statusCode >= 400) {
+        return showOrgMenu(t, phone, "We could not load your withdrawal status right now.\n\n");
+      }
+      const status = result.payload;
+      return showOrgMenu(
+        t,
+        phone,
+        `🧾 *Latest withdrawal*\n\n` +
+          `Status: *${String(status.status || "PENDING").replaceAll("_", " ")}*\n` +
+          `Amount: ${fmtNaira(status.netAmount)}\n` +
+          `${status.bankName || "Bank account"} ····${status.accountLast4 || "----"}\n\n` +
+          `${status.message}\n\n`,
+      );
+    }
 
     case "6":
       session.organizerUser = undefined;
@@ -1732,7 +1875,13 @@ async function handleOrgEventAction(session, input, t, phone) {
 
     case "6": {
       const sales = await Payment.aggregate([
-        { $match: { event: event._id, status: "SUCCESS" } },
+        {
+          $match: {
+            event: event._id,
+            status: "SUCCESS",
+            countsAsTicketSale: { $ne: false },
+          },
+        },
         {
           $group: {
             _id: null,
@@ -1859,28 +2008,73 @@ async function handleWdAmount(session, input, t, phone) {
       `Insufficient wallet balance. Available: ${fmtNaira(wallet?.balance || 0)}\n\n`,
     );
   }
-  await setSession(session, "WD_BANK", { amount });
+
+  let banks = BANKS;
+  try {
+    const liveBanks = await getPaystackBanks();
+    if (liveBanks.length) banks = liveBanks;
+  } catch (error) {
+    console.error("WA BANK LIST ERROR:", error.message);
+  }
+
+  await setSession(session, "WD_BANK", {
+    amount,
+    withdrawalBanks: banks,
+    withdrawalBankPage: 0,
+  });
+  return showWithdrawalBankPage(session, t, phone);
+}
+
+async function showWithdrawalBankPage(session, t, phone) {
+  const banks = Array.isArray(session.data?.withdrawalBanks)
+    ? session.data.withdrawalBanks
+    : BANKS;
+  const page = Math.max(0, Number(session.data?.withdrawalBankPage) || 0);
+  const start = page * BANK_PAGE_SIZE;
+  const pageBanks = banks.slice(start, start + BANK_PAGE_SIZE);
+  if (!pageBanks.length && page > 0) {
+    session.data.withdrawalBankPage = 0;
+    return showWithdrawalBankPage(session, t, phone);
+  }
+
+  const rows = pageBanks.map((bank, index) => ({
+    id: String(index + 1),
+    title: bank.name.slice(0, 24),
+    description: `Code ${bank.code}`,
+  }));
+  if (start + BANK_PAGE_SIZE < banks.length) {
+    rows.push({ id: BANK_MORE_ID, title: "More banks", description: "Show the next bank list" });
+  }
   return uiList(
     t,
     phone,
-    `🏦 Pick the receiving bank.`,
+    `🏦 Pick the receiving bank${banks.length > BANK_PAGE_SIZE ? ` (page ${page + 1})` : ""}.`,
     "Banks",
-    BANKS.map((bank, i) => ({
-      id: String(i + 1),
-      title: bank.name.slice(0, 24),
-      description: `Code ${bank.code}`,
-    })),
+    rows,
   );
 }
 
 async function handleWdBank(session, input, t, phone) {
+  const banks = Array.isArray(session.data?.withdrawalBanks)
+    ? session.data.withdrawalBanks
+    : BANKS;
   const idx = parseInt(input, 10);
-  if (!Number.isInteger(idx) || idx < 1 || idx > BANKS.length) {
-    return t.send(phone, `Please reply with a bank number from the list (1-${BANKS.length}).`);
+  const page = Math.max(0, Number(session.data?.withdrawalBankPage) || 0);
+  const start = page * BANK_PAGE_SIZE;
+  const pageBanks = banks.slice(start, start + BANK_PAGE_SIZE);
+  if (idx === Number(BANK_MORE_ID) && start + BANK_PAGE_SIZE < banks.length) {
+    await setSession(session, "WD_BANK", {
+      ...session.data,
+      withdrawalBankPage: page + 1,
+    });
+    return showWithdrawalBankPage(session, t, phone);
+  }
+  if (!Number.isInteger(idx) || idx < 1 || idx > pageBanks.length) {
+    return t.send(phone, `Please reply with a bank number from the list (1-${pageBanks.length}), or tap More banks.`);
   }
   await setSession(session, "WD_ACCOUNT", {
     ...session.data,
-    bank: BANKS[idx - 1],
+    bank: pageBanks[idx - 1],
   });
   return t.send(phone, `Send the *10-digit account number*.`);
 }
@@ -1900,76 +2094,39 @@ async function handleWdName(session, input, t, phone) {
     return t.send(phone, `Account name is required.`);
   }
 
-  const userId = session.organizerUser;
-  const amount = Number(session.data?.amount || 0);
   const bank = session.data?.bank;
-  const wallet = await Wallet.findOne({ organizer: userId });
-  if (!wallet || wallet.balance < amount) {
+  if (!bank?.code || !session.data?.accountNumber) {
     await setSession(session, "ORG_MENU", {});
-    return showOrgMenu(t, phone, `Insufficient wallet balance. Available: ${fmtNaira(wallet?.balance || 0)}\n\n`);
+    return showOrgMenu(t, phone, "That withdrawal session expired. Please start again.\n\n");
   }
 
-  const pending = await Withdrawal.findOne({ organizer: userId, status: "PENDING" });
-  if (pending) {
-    await setSession(session, "ORG_MENU", {});
-    return showOrgMenu(t, phone, `You already have a pending withdrawal. Wait for it to be processed.\n\n`);
-  }
-
-  await Withdrawal.updateMany(
-    { organizer: userId, status: "AWAITING_OTP" },
-    { status: "EXPIRED" },
-  );
-
-  const fee = transferFee(amount);
-  const netAmount = amount - fee;
-  const otp = String(crypto.randomInt(100000, 1000000));
-  const withdrawal = await Withdrawal.create({
-    organizer: userId,
-    amount,
-    transferFee: fee,
-    netAmount,
-    bankDetails: {
-      bankName: bank.name,
-      bankCode: bank.code,
-      accountNumber: session.data.accountNumber,
-      accountName,
+  const result = await callJsonController(requestWithdrawal, {
+    userId: session.organizerUser,
+    body: {
+      amount: Number(session.data?.amount || 0),
+      bankDetails: {
+        bankName: bank.name,
+        bankCode: bank.code,
+        accountNumber: session.data.accountNumber,
+        accountName,
+      },
     },
-    status: "AWAITING_OTP",
-    otpHash: sha256(otp),
-    otpExpires: new Date(Date.now() + OTP_TTL_MS),
-    otpAttempts: 0,
   });
 
-  const user = await User.findById(userId).select("email name").lean();
-  sendEmail({
-    to: user.email,
-    subject: `Confirm your withdrawal — code ${otp}`,
-    html: `
-      <div style="font-family:sans-serif;max-width:600px;margin:auto;padding:30px;background:#f9fafb;border-radius:16px;">
-        <h2 style="color:#1a1a1a;margin-top:0;">Confirm your withdrawal</h2>
-        <p style="color:#555;line-height:1.7;">Reply in WhatsApp with this code to confirm your payout.</p>
-        <div style="background:#fff;padding:18px 22px;border-radius:12px;border-left:4px solid #E8C96A;margin:16px 0;">
-          <p style="margin:4px 0;"><strong>You receive:</strong> ₦${netAmount.toLocaleString()}</p>
-          <p style="margin:4px 0;"><strong>To:</strong> ${bank.name} ····${session.data.accountNumber.slice(-4)} (${accountName})</p>
-        </div>
-        <div style="text-align:center;background:#fff;padding:18px;border-radius:12px;margin:16px 0;">
-          <p style="margin:0 0 6px;color:#888;font-size:12px;">YOUR CONFIRMATION CODE</p>
-          <p style="margin:0;font-size:32px;font-weight:800;letter-spacing:8px;color:#1a1a1a;">${otp}</p>
-        </div>
-      </div>
-    `,
-  }).catch((err) => console.error("WA withdrawal OTP email failed:", err.message));
+  if (result.statusCode >= 400) {
+    await setSession(session, "ORG_MENU", {});
+    return showOrgMenu(t, phone, `${result.payload.message || "Could not start the withdrawal."}\n\n`);
+  }
 
   await setSession(session, "WD_OTP", {
-    withdrawalId: String(withdrawal._id),
-    amount,
-    netAmount,
+    withdrawalId: String(result.payload.withdrawalId),
+    amount: Number(session.data?.amount || 0),
+    netAmount: result.payload.netAmount,
   });
-  const masked = user.email.replace(/^(..).*(@.*)$/, "$1•••$2");
   return t.send(
     phone,
-    `🔐 We sent a 6-digit confirmation code to ${masked}.\n\n` +
-      `Reply with it here to request ${fmtNaira(netAmount)} to ${bank.name} ····${session.data.accountNumber.slice(-4)}.`,
+    `🔐 ${result.payload.message}\n\n` +
+      `Reply with the code here to confirm your withdrawal.`,
   );
 }
 
@@ -1977,64 +2134,22 @@ async function handleWdOtp(session, input, t, phone) {
   if (!/^\d{6}$/.test(input)) {
     return t.send(phone, `Enter the 6-digit code from your email, or type *menu* to cancel.`);
   }
-  const withdrawal = await Withdrawal.findOne({
-    _id: session.data?.withdrawalId,
-    organizer: session.organizerUser,
-    status: "AWAITING_OTP",
+  const result = await callJsonController(confirmWithdrawal, {
+    userId: session.organizerUser,
+    params: { withdrawalId: session.data?.withdrawalId },
+    body: { otp: input },
   });
-  if (!withdrawal) {
-    await setSession(session, "ORG_MENU", {});
-    return showOrgMenu(t, phone, `No withdrawal is awaiting confirmation.\n\n`);
-  }
-  if (withdrawal.otpExpires < new Date()) {
-    withdrawal.status = "EXPIRED";
-    await withdrawal.save();
-    await setSession(session, "ORG_MENU", {});
-    return showOrgMenu(t, phone, `Code expired. Start the withdrawal again.\n\n`);
-  }
-  if (withdrawal.otpAttempts >= OTP_MAX_ATTEMPTS) {
-    withdrawal.status = "EXPIRED";
-    await withdrawal.save();
-    await setSession(session, "ORG_MENU", {});
-    return showOrgMenu(t, phone, `Too many wrong attempts. Start the withdrawal again.\n\n`);
-  }
-  if (sha256(input) !== withdrawal.otpHash) {
-    withdrawal.otpAttempts += 1;
-    await withdrawal.save();
-    return t.send(phone, `Wrong code — ${OTP_MAX_ATTEMPTS - withdrawal.otpAttempts} attempts left.`);
-  }
 
-  const wallet = await Wallet.findOneAndUpdate(
-    { organizer: session.organizerUser, balance: { $gte: withdrawal.amount } },
-    { $inc: { balance: -withdrawal.amount } },
-    { new: true },
-  );
-  if (!wallet) {
-    withdrawal.status = "EXPIRED";
-    await withdrawal.save();
-    await setSession(session, "ORG_MENU", {});
-    return showOrgMenu(t, phone, `Insufficient balance — the request was cancelled.\n\n`);
+  if (result.statusCode >= 400) {
+    if (result.statusCode === 404 || /expired|too many attempts/i.test(result.payload.message || "")) {
+      await setSession(session, "ORG_MENU", {});
+      return showOrgMenu(t, phone, `${result.payload.message}\n\n`);
+    }
+    return t.send(phone, `❌ ${result.payload.message || "That code was not accepted."}`);
   }
-
-  withdrawal.status = "PENDING";
-  withdrawal.otpHash = undefined;
-  withdrawal.otpExpires = undefined;
-  await withdrawal.save();
-
-  await WalletTransaction.create({
-    organizer: session.organizerUser,
-    type: "DEBIT",
-    amount: withdrawal.amount,
-    reference: `WD-HOLD-${withdrawal._id}`,
-    description: `Withdrawal — ₦${withdrawal.netAmount.toLocaleString()} to ${withdrawal.bankDetails.bankName} ····${withdrawal.bankDetails.accountNumber.slice(-4)} (₦${withdrawal.transferFee} bank transfer fee)`,
-  });
 
   await setSession(session, "ORG_MENU", {});
-  return showOrgMenu(
-    t,
-    phone,
-    `✅ Withdrawal confirmed. You will receive ${fmtNaira(withdrawal.netAmount)} once processed.\n\n`,
-  );
+  return showOrgMenu(t, phone, `✅ ${result.payload.message}\n\n`);
 }
 
 /* ================= GATE SCANNER ================= */
@@ -2279,7 +2394,13 @@ async function handleAffMenu(session, input, t, phone) {
       const [wallet, sales] = await Promise.all([
         Wallet.findOne({ organizer: affId }).lean(),
         Payment.aggregate([
-          { $match: { promoter: code, status: "SUCCESS" } },
+          {
+            $match: {
+              promoter: code,
+              status: "SUCCESS",
+              countsAsTicketSale: { $ne: false },
+            },
+          },
           {
             $group: {
               _id: null,
@@ -2453,11 +2574,51 @@ async function handleEvQty(session, input, t, phone) {
   }
 
   const d = { ...session.data, evQty: qty };
+  const installmentDeadline = new Date(new Date(d.evDate).getTime() - 24 * 60 * 60 * 1000);
+  if (Number(d.evPrice) > 0 && installmentDeadline > new Date()) {
+    await setSession(session, "EV_INSTALLMENT", d);
+    return uiButtons(
+      t,
+      phone,
+      `🧾 Allow guests to pay for *${d.evTitle}* in installments?\n\n` +
+        `They will reserve the ticket with a minimum 30% payment and receive the QR only after completing the balance.`,
+      [
+        { id: "1", title: "✅ Allow" },
+        { id: "2", title: "⏭️ Not now" },
+      ],
+    );
+  }
+
   await setSession(session, "EV_BANNER", d);
   return uiButtons(
     t,
     phone,
     `🖼️ Send the event *banner/flyer image* now, or skip and use the Tictify placeholder.`,
+    [{ id: "skip", title: "Skip for now" }],
+  );
+}
+
+async function handleEvInstallment(session, input, t, phone) {
+  if (input !== "1" && input !== "2") {
+    return t.send(phone, `Tap ✅ Allow or ⏭️ Not now (or reply *1* / *2*).`);
+  }
+
+  const enabled = input === "1";
+  const d = {
+    ...session.data,
+    installmentsEnabled: enabled,
+    installmentMinimumPercent: enabled ? 30 : undefined,
+    installmentDueAt: enabled
+      ? new Date(new Date(session.data.evDate).getTime() - 24 * 60 * 60 * 1000).toISOString()
+      : undefined,
+  };
+  await setSession(session, "EV_BANNER", d);
+  return uiButtons(
+    t,
+    phone,
+    enabled
+      ? `✅ Installments enabled with a 30% minimum first payment. You can fine-tune the percentage and deadline on the website.\n\n🖼️ Send the event *banner/flyer image* now, or skip and use the Tictify placeholder.`
+      : `Installments are off for this event.\n\n🖼️ Send the event *banner/flyer image* now, or skip and use the Tictify placeholder.`,
     [{ id: "skip", title: "Skip for now" }],
   );
 }
@@ -2472,6 +2633,7 @@ function confirmEventPrompt(d) {
       `📍 ${d.evLocation}, ${d.evCity}\n` +
       `🎭 ${d.evCategory}\n` +
       `🎟️ ${d.evTicketName} — ${d.evPrice === 0 ? "Free" : fmtNaira(d.evPrice)} × ${d.evQty} (capacity ${d.evQty})\n` +
+      `${d.installmentsEnabled ? `🧾 Installments: enabled — minimum ${d.installmentMinimumPercent || 30}%\n` : ""}` +
       `🖼️ Banner: ${d.evBanner ? "uploaded" : "placeholder"}\n\n` +
       `📌 It will be saved as a *DRAFT*. You can publish it from this bot after creation.`,
     [
@@ -2568,6 +2730,9 @@ async function handleEvConfirm(session, input, t, phone) {
     bannerFit: "cover",
     affiliatesEnabled: false,
     affiliatePercent: 15,
+    installmentsEnabled: Boolean(d.installmentsEnabled && Number(d.evPrice) > 0),
+    installmentMinimumPercent: d.installmentsEnabled ? (d.installmentMinimumPercent || 30) : 30,
+    installmentDueAt: d.installmentsEnabled ? d.installmentDueAt : undefined,
   });
 
   await setSession(session, "ORG_MENU", {});

@@ -20,7 +20,13 @@ export const organizerDashboard = async (req, res) => {
       /* Money truth: successful Payments — quantity-aware, matches
          exactly what the wallet was credited (organizerAmount) */
       Payment.aggregate([
-        { $match: { organizer: organizerId, status: "SUCCESS" } },
+        {
+          $match: {
+            organizer: organizerId,
+            status: "SUCCESS",
+            countsAsTicketSale: { $ne: false },
+          },
+        },
         {
           $group: {
             _id: "$event",

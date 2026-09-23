@@ -21,8 +21,24 @@ export const getAdminOrganizers = async (req, res) => {
         {
           $group: {
             _id: "$organizer",
-            ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
-            organizerAmount: { $sum: "$organizerAmount" }, // owed to organizer
+            ticketsSold: {
+              $sum: {
+                $cond: [
+                  { $ne: ["$countsAsTicketSale", false] },
+                  { $ifNull: ["$quantity", 1] },
+                  0,
+                ],
+              },
+            },
+            organizerAmount: {
+              $sum: {
+                $cond: [
+                  { $ne: ["$countsAsTicketSale", false] },
+                  { $ifNull: ["$organizerAmount", 0] },
+                  0,
+                ],
+              },
+            }, // owed to organizer
             grossRevenue: { $sum: "$amount" }, // everything guests paid
             platformFees: { $sum: "$platformFee" }, // Tictify's cut
           },
@@ -77,7 +93,7 @@ export const getAdminEvents = async (req, res) => {
        DOCUMENTS (one per order) and so undercounted every group order and
        disagreed with availability.totalSold on the same row. */
     const soldRows = await Payment.aggregate([
-      { $match: { status: "SUCCESS" } },
+      { $match: { status: "SUCCESS", countsAsTicketSale: { $ne: false } } },
       {
         $group: {
           _id: "$event",
@@ -182,7 +198,15 @@ export const getAdminAnalytics = async (_, res) => {
       $group: {
         _id: "$event",
         revenue: { $sum: "$amount" },
-        sold: { $sum: { $ifNull: ["$quantity", 1] } },
+        sold: {
+          $sum: {
+            $cond: [
+              { $ne: ["$countsAsTicketSale", false] },
+              { $ifNull: ["$quantity", 1] },
+              0,
+            ],
+          },
+        },
       },
     },
     { $sort: { revenue: -1 } },
@@ -204,7 +228,15 @@ export const getAdminAnalytics = async (_, res) => {
       $group: {
         _id: "$organizer",
         revenue: { $sum: "$amount" },
-        sold: { $sum: { $ifNull: ["$quantity", 1] } },
+        sold: {
+          $sum: {
+            $cond: [
+              { $ne: ["$countsAsTicketSale", false] },
+              { $ifNull: ["$quantity", 1] },
+              0,
+            ],
+          },
+        },
       },
     },
     { $sort: { revenue: -1 } },

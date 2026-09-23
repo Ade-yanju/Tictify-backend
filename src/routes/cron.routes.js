@@ -2,6 +2,10 @@ import express from "express";
 import crypto from "crypto";
 import { sendUpcomingEventReminders, sendPostEventReports } from "../services/eventReminder.service.js";
 import { processPendingPayouts } from "../services/payoutQueue.service.js";
+import {
+  expireInstallmentPlans,
+  sendInstallmentReminders,
+} from "../services/installment.service.js";
 
 const router = express.Router();
 
@@ -34,6 +38,18 @@ router.all("/payouts", async (req, res) => {
   } catch (err) {
     console.error("CRON PAYOUT ERROR:", err);
     res.status(500).json({ message: "Payout processing failed" });
+  }
+});
+
+router.all("/installments", async (req, res) => {
+  if (!authorized(req)) return res.status(401).json({ message: "Unauthorized" });
+  try {
+    const reminders = await sendInstallmentReminders();
+    const result = await expireInstallmentPlans();
+    res.json({ ok: true, ...reminders, ...result });
+  } catch (err) {
+    console.error("CRON INSTALLMENT ERROR:", err);
+    res.status(500).json({ message: "Installment expiry failed" });
   }
 });
 

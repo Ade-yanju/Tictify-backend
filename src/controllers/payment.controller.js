@@ -1,4 +1,5 @@
 import crypto from "crypto";
+import mongoose from "mongoose";
 import fetch from "node-fetch";
 import QRCode from "qrcode";
 import Event from "../models/Event.js";
@@ -13,6 +14,14 @@ import {
   whatsappConfigured,
   deliverTicketToWhatsApp,
 } from "../services/whatsapp.service.js";
+import { computeFees as sharedComputeFees } from "../utils/paymentFees.js";
+import { effectivePrice as sharedEffectivePrice } from "../utils/pricing.js";
+import InstallmentPlan from "../models/InstallmentPlan.js";
+import {
+  processInstallmentPayment,
+  emailInstallmentPlanUpdate,
+  refundExpiredInstallmentPlan,
+} from "../services/installment.service.js";
 
 /* =====================================================
    PAYMENT-METHOD CAPABILITY
@@ -48,16 +57,7 @@ export const getPaymentMethods = (req, res) =>
 
 /* Early-bird: a tier can carry a cheaper price until a cutoff */
 export function effectivePrice(tier, at = new Date()) {
-  if (
-    tier &&
-    tier.earlyBirdPrice != null &&
-    tier.earlyBirdPrice >= 0 &&
-    tier.earlyBirdUntil &&
-    new Date(tier.earlyBirdUntil) > at
-  ) {
-    return Number(tier.earlyBirdPrice);
-  }
-  return Number(tier?.price || 0);
+  return sharedEffectivePrice(tier, at);
 }
 
 /* =====================================================
@@ -68,16 +68,7 @@ export function effectivePrice(tier, at = new Date()) {
      so the organizer always receives the full ticket price.
 ===================================================== */
 export function computeFees(ticketPrice) {
-  const platformFee = Math.round(ticketPrice * 0.03 + 80);
-  const base = ticketPrice + platformFee;
-  let processingFee = Math.round(base * 0.015) + (base >= 2500 ? 100 : 0);
-  processingFee = Math.min(processingFee, 2000);
-  return {
-    ticketPrice,
-    platformFee,
-    processingFee,
-    total: ticketPrice + platformFee + processingFee,
-  };
+  return sharedComputeFees(ticketPrice);
 }
 
 /* Public quote — checkout shows this exact breakdown.
@@ -222,7 +213,10 @@ export async function createPaymentSession({
 
     /* 4️⃣ ENFORCE QUANTITY (buyer can take 1-10 tickets per order) */
     const qty = Math.min(10, Math.max(1, parseInt(quantity) || 1));
-    const tierRemaining = ticketConfig.quantity - (ticketConfig.sold || 0);
+    const tierRemaining =
+      ticketConfig.quantity -
+      (ticketConfig.sold || 0) -
+      (ticketConfig.reserved || 0);
     if (tierRemaining < qty) {
       return {
         ok: false,
@@ -236,7 +230,7 @@ export async function createPaymentSession({
 
     /* 5️⃣ ENFORCE EVENT CAPACITY */
     const totalSold = event.ticketTypes.reduce(
-      (sum, t) => sum + (t.sold || 0),
+      (sum, t) => sum + (t.sold || 0) + (t.reserved || 0),
       0,
     );
     if (totalSold + qty > event.capacity) {
@@ -616,11 +610,45 @@ export const paymentCallback = async (req, res) => {
         email: metadata.email,
         amount: verifyData.data.amount / 100,
         platformFee: 0,
-        organizerAmount: verifyData.data.amount / 100,
-        status: "SUCCESS",
+        organizerAmount: metadata?.installmentPlan ? 0 : verifyData.data.amount / 100,
+        status: metadata?.installmentPlan ? "PENDING" : "SUCCESS",
         provider: "PAYSTACK",
+        paymentType: metadata?.installmentPlan ? "INSTALLMENT" : "DIRECT_TICKET",
+        installmentPlan: metadata?.installmentPlan,
+        installmentAmount: metadata?.installmentAmount,
+        countsAsTicketSale: !metadata?.installmentPlan,
       });
-    } else if (payment.status !== "SUCCESS") {
+    }
+
+    if (payment.paymentType === "INSTALLMENT" || payment.installmentPlan) {
+      const session = await mongoose.startSession();
+      let result;
+      try {
+        await session.withTransaction(async () => {
+          const transactionPayment = await Payment.findOne({ reference }).session(session);
+          result = await processInstallmentPayment(transactionPayment, session);
+        });
+      } finally {
+        await session.endSession();
+      }
+      const plan = await InstallmentPlan.findById(payment.installmentPlan).select("+accessToken");
+      const token = req.query.installmentToken || plan?.accessToken;
+      if (result.completed && !result.alreadyProcessed) {
+        emailTicketToGuest(plan?.reference || payment.reference);
+      } else if (plan && !result.expired && !result.alreadyProcessed) {
+        emailInstallmentPlanUpdate(plan.reference);
+      }
+      if (result.expired && plan?._id) {
+        refundExpiredInstallmentPlan(plan._id).catch((err) =>
+          console.error("LATE INSTALLMENT REFUND ERROR:", err.message),
+        );
+      }
+      return res.redirect(token
+        ? `${process.env.FRONTEND_URL}/installments/${token}`
+        : `${process.env.FRONTEND_URL}/payment/pending?reference=${payment.reference}`);
+    }
+
+    if (payment.status !== "SUCCESS") {
       payment.status = "SUCCESS";
       await payment.save();
     }

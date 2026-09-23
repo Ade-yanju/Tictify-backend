@@ -14,7 +14,7 @@
 
    AUTHORITATIVE SOURCE = Payment documents:
 
-     { event, ticketType, status: "SUCCESS" }
+     { event, ticketType, status: "SUCCESS", countsAsTicketSale: true }
      Σ { $ifNull: ["$quantity", 1] }  grouped by $ticketType
 
    That matches `tier.sold` semantics exactly. A qty-2 order
@@ -58,7 +58,16 @@ export async function reconcileEventSold(event) {
   }
 
   const rows = await Payment.aggregate([
-    { $match: { event: toObjectId(event._id), status: "SUCCESS" } },
+    {
+      $match: {
+        event: toObjectId(event._id),
+        status: "SUCCESS",
+        $or: [
+          { paymentType: { $ne: "INSTALLMENT" } },
+          { countsAsTicketSale: true },
+        ],
+      },
+    },
     {
       $group: {
         _id: "$ticketType",

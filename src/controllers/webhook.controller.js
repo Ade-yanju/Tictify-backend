@@ -11,7 +11,13 @@ import { sendEmail } from "../services/email.service.js";
 import {
   whatsappConfigured,
   deliverTicketToWhatsApp,
+  sendText,
 } from "../services/whatsapp.service.js";
+import {
+  processInstallmentPayment,
+  emailInstallmentPlanUpdate,
+  refundExpiredInstallmentPlan,
+} from "../services/installment.service.js";
 
 const PUBLIC_API =
   process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
@@ -30,8 +36,12 @@ async function handleTransferEvent(payload, res) {
 
     if (payload.event === "transfer.success") {
       const withdrawal = await Withdrawal.findOneAndUpdate(
-        { paystackReference: reference, status: "APPROVED" },
-        { status: "PAID" },
+        { paystackReference: reference, status: { $in: ["APPROVED"] } },
+        {
+          status: "PAID",
+          paidAt: new Date(),
+          paystackTransferStatus: payload?.data?.status || "success",
+        },
         { new: true },
       );
       if (withdrawal) {
@@ -53,10 +63,13 @@ async function handleTransferEvent(payload, res) {
       const withdrawal = await Withdrawal.findOneAndUpdate(
         {
           paystackReference: reference,
-          status: "APPROVED",
+          status: { $in: ["APPROVED"] },
         },
         {
           status: "FAILED",
+          failedAt: new Date(),
+          failureCode: "TRANSFER_FAILED",
+          paystackTransferStatus: payload?.data?.status || payload.event.split(".")[1],
           failureReason:
             payload?.data?.reason ||
             payload?.data?.gateway_response ||
@@ -198,6 +211,7 @@ export const handlePaymentWebhook = async (req, res) => {
     /* =====================================================
        🔥 DB TRANSACTION
     ===================================================== */
+    let installmentResult = null;
     await session.withTransaction(async () => {
       /* ── Find payment ── */
       let payment = await Payment.findOne({ reference }).session(session);
@@ -223,10 +237,19 @@ export const handlePaymentWebhook = async (req, res) => {
               organizerAmount: payload.data.amount / 100,
               status: "PENDING",
               provider: "PAYSTACK",
+              paymentType: meta?.installmentPlan ? "INSTALLMENT" : "DIRECT_TICKET",
+              installmentPlan: meta?.installmentPlan,
+              installmentAmount: meta?.installmentAmount,
+              countsAsTicketSale: !meta?.installmentPlan,
             },
           ],
           { session },
         ).then((r) => r[0]);
+      }
+
+      if (payment.paymentType === "INSTALLMENT" || payment.installmentPlan) {
+        installmentResult = await processInstallmentPayment(payment, session);
+        return;
       }
 
       /* ── Idempotency guard ── */
@@ -320,6 +343,43 @@ export const handlePaymentWebhook = async (req, res) => {
     });
 
     session.endSession();
+
+    if (installmentResult) {
+      const planReference = installmentResult.plan?.reference;
+      const waPhone = installmentResult.plan?.waPhone;
+      const planUrl = installmentResult.plan?.accessToken
+        ? `${process.env.FRONTEND_URL || "https://www.tictify.ng"}/installments/${installmentResult.plan.accessToken}`
+        : null;
+      if (installmentResult.completed && planReference && !installmentResult.alreadyProcessed) {
+        emailTicketToGuest(planReference);
+        if (waPhone && whatsappConfigured) {
+          deliverTicketToWhatsApp({
+            phone: waPhone,
+            eventTitle: installmentResult.plan.eventTitle,
+            reference: planReference,
+          }).catch((err) => console.error("Installment WhatsApp ticket failed:", err.message));
+        }
+      } else if (planReference && !installmentResult.expired && !installmentResult.alreadyProcessed) {
+        emailInstallmentPlanUpdate(planReference);
+        if (waPhone && whatsappConfigured) {
+          sendText(
+            waPhone,
+            `✅ Installment payment received for *${installmentResult.plan.eventTitle || "your event"}*.\n\n` +
+              `Paid so far: ${Number(installmentResult.plan.amountPaid || 0).toLocaleString("en-NG")}\n` +
+              `Remaining: ${Number(installmentResult.plan.amountRemaining || 0).toLocaleString("en-NG")}\n\n` +
+              `Complete the balance by ${new Date(installmentResult.plan.dueAt).toLocaleString("en-NG")}.\n` +
+              (planUrl ? `Pay here: ${planUrl}` : "The payment link was sent to your email."),
+          ).catch((err) => console.error("Installment WhatsApp update failed:", err.message));
+        }
+      }
+      if (installmentResult.expired && installmentResult.plan?._id) {
+        refundExpiredInstallmentPlan(installmentResult.plan._id)
+          .catch((err) =>
+            console.error("LATE INSTALLMENT REFUND ERROR:", err.message),
+          );
+      }
+      return res.status(200).send("processed");
+    }
 
     // 📧 deliver the ticket to the guest's inbox (fire-and-forget)
     emailTicketToGuest(reference);

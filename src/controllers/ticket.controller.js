@@ -28,7 +28,7 @@ export const getGateStats = async (req, res) => {
       {
         $group: {
           _id: null,
-          ticketsSold: { $sum: 1 },
+          ticketsSold: { $sum: { $ifNull: ["$quantity", 1] } },
           guestsExpected: { $sum: { $ifNull: ["$groupSize", 1] } },
           guestsAdmitted: { $sum: { $ifNull: ["$admittedCount", 0] } },
         },
@@ -66,6 +66,7 @@ export const getPromoterStats = async (req, res) => {
         $match: {
           event: event._id,
           status: "SUCCESS",
+          countsAsTicketSale: { $ne: false },
           promoter: { $exists: true, $nin: [null, ""] },
         },
       },
@@ -83,6 +84,7 @@ export const getPromoterStats = async (req, res) => {
     const direct = await Payment.countDocuments({
       event: event._id,
       status: "SUCCESS",
+      countsAsTicketSale: { $ne: false },
       $or: [{ promoter: { $exists: false } }, { promoter: null }, { promoter: "" }],
     });
 

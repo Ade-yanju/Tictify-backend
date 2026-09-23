@@ -206,7 +206,13 @@ router.get("/me", authenticate, canUseAffiliateDashboard, async (req, res) => {
     const [wallet, sales] = await Promise.all([
       Wallet.findOne({ organizer: req.user._id }),
       Payment.aggregate([
-        { $match: { promoter: code, status: "SUCCESS" } },
+        {
+          $match: {
+            promoter: code,
+            status: "SUCCESS",
+            countsAsTicketSale: { $ne: false },
+          },
+        },
         {
           $group: {
             _id: null,

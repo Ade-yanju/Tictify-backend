@@ -105,6 +105,25 @@ const paymentSchema = new mongoose.Schema(
       index: true,
     },
 
+    paymentType: {
+      type: String,
+      enum: ["DIRECT_TICKET", "INSTALLMENT"],
+      default: "DIRECT_TICKET",
+      index: true,
+    },
+
+    installmentPlan: {
+      type: mongoose.Schema.Types.ObjectId,
+      ref: "InstallmentPlan",
+      index: true,
+    },
+
+    /* Principal applied to the reservation, excluding the gateway fee.
+       Direct payments leave this unset and use organizerAmount instead. */
+    installmentAmount: { type: Number, min: 0 },
+    installmentNumber: { type: Number, min: 1 },
+    countsAsTicketSale: { type: Boolean, default: true, index: true },
+
     verifiedAt: {
       type: Date,
     },

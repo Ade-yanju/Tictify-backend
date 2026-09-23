@@ -6,12 +6,63 @@ import {
   payoutToBank,
   paystackConfigured,
   transferFee,
+  getAvailableBalance,
+  paystackTransferCharge,
+  getPaystackBanks,
+  resolvePaystackAccount,
 } from "../services/paystack.service.js";
 import { sendEmail } from "../services/email.service.js";
 import User from "../models/User.js";
 
 const MIN_WITHDRAWAL = 500; // ₦
 const MAX_WITHDRAWAL = 5_000_000; // ₦ sanity ceiling per request
+const PAYOUT_RETRY_DELAY_MS = 10 * 60 * 1000;
+
+function organizerStatusMessage(withdrawal) {
+  switch (withdrawal?.status) {
+    case "PAID":
+      return "Your withdrawal has been completed and sent to your bank.";
+    case "APPROVED":
+      return "Your withdrawal has been sent for processing. You do not need to do anything else.";
+    case "FAILED":
+      return "We could not complete this withdrawal. The funds have been returned to your wallet.";
+    case "REJECTED":
+      return "This withdrawal was declined and the funds have been returned to your wallet.";
+    case "EXPIRED":
+      return "This withdrawal request expired. You can start a new request.";
+    case "AWAITING_OTP":
+      return "Confirm the code sent to your email to continue this withdrawal.";
+    case "PENDING":
+    default:
+      return "Your withdrawal is queued and will be processed automatically. You do not need to do anything else.";
+  }
+}
+
+function organizerWithdrawalView(withdrawal) {
+  return {
+    id: String(withdrawal._id),
+    status: withdrawal.status,
+    amount: withdrawal.amount,
+    transferFee: withdrawal.transferFee || 0,
+    netAmount: withdrawal.netAmount ?? withdrawal.amount,
+    bankName: withdrawal.bankDetails?.bankName || "",
+    accountLast4: withdrawal.bankDetails?.accountNumber?.slice(-4) || "",
+    createdAt: withdrawal.createdAt,
+    approvedAt: withdrawal.approvedAt || null,
+    paidAt: withdrawal.paidAt || null,
+    message: organizerStatusMessage(withdrawal),
+  };
+}
+
+function queueWithdrawal(withdrawal, category, reason) {
+  withdrawal.status = "PENDING";
+  withdrawal.approvedAt = undefined;
+  withdrawal.failureCode = category || "TRANSIENT";
+  // This reason is for internal/admin diagnostics only. It is never returned
+  // by the organizer history/status endpoints.
+  withdrawal.failureReason = reason || undefined;
+  withdrawal.nextAttemptAt = new Date(Date.now() + PAYOUT_RETRY_DELAY_MS);
+}
 
 /* =====================================================
    REQUEST WITHDRAWAL — escrow model
@@ -59,10 +110,33 @@ export const requestWithdrawal = async (req, res) => {
       return res.status(400).json({ message: "Please select a bank" });
     }
 
+    /* Verify the destination against Paystack before sending an OTP. This
+       avoids holding wallet funds for a mistyped bank code/account pair. */
+    let verifiedAccountName = accountName;
+    if (paystackConfigured) {
+      try {
+        const resolved = await resolvePaystackAccount({
+          accountNumber,
+          bankCode,
+        });
+        if (!resolved?.account_name) {
+          return res.status(400).json({
+            message: "We could not verify that bank account. Check the details and try again.",
+          });
+        }
+        verifiedAccountName = String(resolved.account_name).trim();
+      } catch (error) {
+        console.error("BANK ACCOUNT RESOLUTION ERROR:", error.message);
+        return res.status(400).json({
+          message: "We could not verify that bank account. Check the details and try again.",
+        });
+      }
+    }
+
     /* ── 3. One pending request at a time ── */
     const pending = await Withdrawal.findOne({
       organizer: userId,
-      status: "PENDING",
+      status: { $in: ["PENDING", "APPROVED"] },
     });
     if (pending) {
       return res.status(409).json({
@@ -98,7 +172,12 @@ export const requestWithdrawal = async (req, res) => {
       amount,
       transferFee: fee,
       netAmount,
-      bankDetails: { bankName, bankCode, accountNumber, accountName },
+      bankDetails: {
+        bankName,
+        bankCode,
+        accountNumber,
+        accountName: verifiedAccountName,
+      },
       status: "AWAITING_OTP",
       otpHash: crypto.createHash("sha256").update(otp).digest("hex"),
       otpExpires: new Date(Date.now() + 10 * 60 * 1000),
@@ -124,7 +203,7 @@ export const requestWithdrawal = async (req, res) => {
           <p style="color:#555;line-height:1.7;">You (or someone using your account) requested a payout:</p>
           <div style="background:#fff;padding:18px 22px;border-radius:12px;border-left:4px solid #E8C96A;margin:16px 0;">
             <p style="margin:4px 0;"><strong>You receive:</strong> ₦${netAmount.toLocaleString()} <span style="color:#888;">(₦50 stamp duty + ₦50 platform fee)</span></p>
-            <p style="margin:4px 0;"><strong>To:</strong> ${bankName} ····${accountNumber.slice(-4)} (${accountName})</p>
+            <p style="margin:4px 0;"><strong>To:</strong> ${bankName} ····${accountNumber.slice(-4)} (${verifiedAccountName})</p>
           </div>
           ${usedBefore ? "" : `<p style="color:#B00020;font-weight:bold;">⚠️ This bank account has never been used on your Tictify account before.</p>`}
           <div style="text-align:center;background:#fff;padding:18px;border-radius:12px;margin:16px 0;">
@@ -224,9 +303,28 @@ export const confirmWithdrawal = async (req, res) => {
 
     /* ── INSTANT PAYOUT (AUTO_APPROVE_WITHDRAWALS=true) ── */
     if (process.env.AUTO_APPROVE_WITHDRAWALS === "true" && paystackConfigured) {
+      const payAmount = withdrawal.netAmount ?? withdrawal.amount;
+      const needed = payAmount + paystackTransferCharge(payAmount);
+      const available = await getAvailableBalance();
+
+      /* A low settled balance is normal while Paystack is settling funds.
+         Keep the wallet hold and let the queue retry; do not send provider
+         terminology or internal balance information to the organizer. */
+      if (available != null && available < needed) {
+        withdrawal.failureCode = "PAYSTACK_BALANCE_LOW";
+        withdrawal.failureReason = "Settled payout capacity is below this request.";
+        withdrawal.nextAttemptAt = new Date(Date.now() + PAYOUT_RETRY_DELAY_MS);
+        await withdrawal.save();
+        return res.json({
+          message:
+            "Confirmed! Your withdrawal is queued and will be completed automatically. You do not need to do anything else.",
+          status: "PENDING",
+        });
+      }
+
       try {
         const payout = await payoutToBank({
-          amount: withdrawal.netAmount,
+          amount: payAmount,
           bankDetails: bd,
           reason: `Tictify payout — ${bd.accountName}`,
           reference: `wd_${withdrawal._id}`,
@@ -236,12 +334,18 @@ export const confirmWithdrawal = async (req, res) => {
         // Live Paystack transfers are asynchronous; the webhook confirms PAID.
         withdrawal.status = "APPROVED";
         withdrawal.paystackReference = payout.reference;
+        withdrawal.paystackTransferCode = payout.transferCode;
+        withdrawal.paystackTransferStatus = payout.status;
         withdrawal.paystackRecipientCode = payout.recipientCode;
         withdrawal.approvedAt = new Date();
+        withdrawal.lastAttemptAt = new Date();
+        withdrawal.failureCode = undefined;
+        withdrawal.failureReason = undefined;
+        withdrawal.nextAttemptAt = undefined;
         await withdrawal.save();
 
         return res.json({
-          message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} is on the way to your bank.`,
+          message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} has been sent for processing. You do not need to do anything else.`,
           status: "APPROVED",
         });
       } catch (paystackErr) {
@@ -249,12 +353,18 @@ export const confirmWithdrawal = async (req, res) => {
            funds stay held and the payout queue retries automatically
            every few minutes until the balance covers it. */
         console.error("AUTO PAYOUT FAILED:", paystackErr.message);
-        withdrawal.failureReason = paystackErr.message;
+        queueWithdrawal(
+          withdrawal,
+          paystackErr.category || "TRANSIENT",
+          paystackErr.message,
+        );
+        withdrawal.lastAttemptAt = new Date();
         await withdrawal.save();
       }
 
       return res.json({
-        message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} will be sent to your bank automatically — usually within 24 hours. Nothing else for you to do.`,
+        message:
+          "Confirmed! Your withdrawal is queued and will be completed automatically. You do not need to do anything else.",
         status: "PENDING",
       });
     }
@@ -272,12 +382,45 @@ export const confirmWithdrawal = async (req, res) => {
 /* ================= ORGANIZER: WITHDRAWAL HISTORY ================= */
 export const getAllWithdrawals = async (req, res) => {
   try {
-    const withdrawals = await Withdrawal.find({ organizer: req.user.id }).sort({
-      createdAt: -1,
-    });
-    res.json(withdrawals);
+    const withdrawals = await Withdrawal.find({ organizer: req.user.id })
+      .sort({ createdAt: -1 })
+      .lean();
+    res.json(withdrawals.map(organizerWithdrawalView));
   } catch (error) {
     console.error("FETCH WITHDRAWALS ERROR:", error);
     res.status(500).json({ message: "Could not load withdrawal history." });
+  }
+};
+
+/* ================= ORGANIZER: BANK OPTIONS ================= */
+export const getWithdrawalBanks = async (req, res) => {
+  try {
+    const banks = await getPaystackBanks();
+    return res.json({ banks });
+  } catch (error) {
+    console.error("WITHDRAWAL BANK LIST ERROR:", error);
+    return res.status(503).json({ message: "Bank list is temporarily unavailable" });
+  }
+};
+
+/* ================= ORGANIZER: SAFE STATUS =================
+   This is the source of truth used by the organizer UI after confirmation.
+   It intentionally returns no Paystack reference, raw provider error, or
+   complete bank account details. */
+export const getWithdrawalStatus = async (req, res) => {
+  try {
+    const withdrawal = await Withdrawal.findOne({
+      _id: req.params.withdrawalId,
+      organizer: req.user.id,
+    }).lean();
+
+    if (!withdrawal) {
+      return res.status(404).json({ message: "Withdrawal not found" });
+    }
+
+    return res.json(organizerWithdrawalView(withdrawal));
+  } catch (error) {
+    console.error("WITHDRAWAL STATUS ERROR:", error);
+    return res.status(500).json({ message: "Could not load withdrawal status" });
   }
 };

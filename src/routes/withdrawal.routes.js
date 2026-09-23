@@ -5,11 +5,20 @@ import {
   requestWithdrawal,
   confirmWithdrawal,
   getAllWithdrawals, // Added this back so you can still view history
+  getWithdrawalStatus,
+  getWithdrawalBanks,
 } from "../controllers/withdrawal.controller.js";
 
 const router = express.Router();
 
 /* ===== ORGANIZER ===== */
+router.get(
+  "/banks",
+  authenticate,
+  authorize("organizer", "ambassador", "affiliate"),
+  getWithdrawalBanks,
+);
+
 // This now handles the full instant Paystack transfer
 router.post(
   "/request",
@@ -27,9 +36,20 @@ router.post(
   confirmWithdrawal,
 );
 
-/* ===== ADMIN ===== */
-// We removed the "approve" route because it's now instant!
-// I've added the "all" route here so admins can still monitor the logs.
-router.get("/all", authenticate, authorize("admin"), getAllWithdrawals);
+router.get(
+  "/:withdrawalId/status",
+  authenticate,
+  authorize("organizer", "ambassador", "affiliate"),
+  getWithdrawalStatus,
+);
+
+/* ===== ORGANIZER HISTORY ===== */
+// The admin list is mounted separately under /api/admin/withdrawals.
+router.get(
+  "/all",
+  authenticate,
+  authorize("organizer", "ambassador", "affiliate"),
+  getAllWithdrawals,
+);
 
 export default router;

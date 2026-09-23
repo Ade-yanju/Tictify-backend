@@ -243,7 +243,13 @@ export const ambassadorDashboard = async (req, res) => {
     const [organizersOnboarded, salesAgg, wallet] = await Promise.all([
       User.countDocuments({ referredBy: profile.inviteCode, role: "organizer" }),
       Payment.aggregate([
-        { $match: { promoter: profile.inviteCode, status: "SUCCESS" } },
+        {
+          $match: {
+            promoter: profile.inviteCode,
+            status: "SUCCESS",
+            countsAsTicketSale: { $ne: false },
+          },
+        },
         {
           $group: {
             _id: null,
@@ -290,7 +296,13 @@ export const adminAmbassadorLeaderboard = async (req, res) => {
 
     const [sales, onboarded, wallets] = await Promise.all([
       Payment.aggregate([
-        { $match: { promoter: { $in: codes }, status: "SUCCESS" } },
+        {
+          $match: {
+            promoter: { $in: codes },
+            status: "SUCCESS",
+            countsAsTicketSale: { $ne: false },
+          },
+        },
         {
           $group: {
             _id: "$promoter",

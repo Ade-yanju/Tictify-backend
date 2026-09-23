@@ -29,7 +29,13 @@ const withdrawalSchema = new mongoose.Schema(
       default: "PENDING",
     },
 
+    // Internal-only diagnostics. Organizer responses deliberately omit these
+    // fields so Paystack/provider details never leak into the user experience.
+    failureCode: String,
     failureReason: String,
+    nextAttemptAt: Date,
+    lastAttemptAt: Date,
+    organizerNotifiedAt: Date,
 
     /* Withdrawal confirmation (anti-fraud): a 6-digit code emailed to
        the ACCOUNT email must be entered before any money moves */
@@ -48,7 +54,11 @@ const withdrawalSchema = new mongoose.Schema(
       ref: "User", // admin
     },
     approvedAt: Date,
+    paidAt: Date,
+    failedAt: Date,
     paystackReference: String,
+    paystackTransferCode: String,
+    paystackTransferStatus: String,
     // Reused on retries so an uncertain API response cannot create a duplicate payout.
     paystackRecipientCode: String,
   },

@@ -5,7 +5,8 @@ const ticketTypeSchema = new mongoose.Schema(
     name: { type: String, required: true },
     price: { type: Number, required: true },
     quantity: { type: Number, required: true }, // total available
-    sold: { type: Number, default: 0 }, // 🔥 track sold tickets
+    sold: { type: Number, default: 0 }, // 🔥 track fully paid tickets
+    reserved: { type: Number, default: 0, min: 0 }, // active installment holds
     groupSize: { type: Number, default: 1, min: 1 }, // people admitted per ticket (e.g. Group of Friends x4)
     earlyBirdPrice: { type: Number, min: 0 }, // optional cheaper price...
     earlyBirdUntil: { type: Date }, // ...until this moment
@@ -100,6 +101,13 @@ const eventSchema = new mongoose.Schema(
        price, paid from the organizer's revenue) */
     affiliatesEnabled: { type: Boolean, default: false },
     affiliatePercent: { type: Number, min: 1, max: 50, default: 15 },
+
+    /* Optional flexible payments. A reservation is held until this
+       deadline, but no ticket/QR exists until the balance is complete. */
+    installmentsEnabled: { type: Boolean, default: false },
+    installmentMinimumPercent: { type: Number, min: 10, max: 90, default: 30 },
+    installmentDueAt: { type: Date },
+    reservedTickets: { type: Number, default: 0, min: 0 },
 
     cancelledAt: Date,
     cancelReason: String,

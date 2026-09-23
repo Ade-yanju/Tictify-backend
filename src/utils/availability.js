@@ -6,9 +6,9 @@
    (payment.controller.js) exactly, or a page will advertise
    a sale the server then refuses:
 
-     tier guard   : tierRemaining = tier.quantity - (tier.sold || 0)
+     tier guard   : tierRemaining = tier.quantity - (tier.sold || 0) - (tier.reserved || 0)
                     refused when tierRemaining < qty
-     event guard  : totalSold = Σ ticketTypes[].sold
+     event guard  : committed = Σ ticketTypes[].sold + event.reservedTickets
                     refused when totalSold + qty > event.capacity
 
    Both guards count TICKETS, not guests — a group ticket
@@ -88,9 +88,10 @@ function safeLimit(value) {
  * @returns {{
  *   capacity: number|null,
  *   totalSold: number,
+ *   totalReserved: number,
  *   remaining: number|null,
  *   soldOut: boolean,
- *   tiers: Array<{name:string, quantity:number|null, sold:number,
+ *   tiers: Array<{name:string, quantity:number|null, sold:number, reserved:number,
  *                 remaining:number, soldOut:boolean}>
  * }}
  */
@@ -99,12 +100,13 @@ export function computeAvailability(event) {
 
   /* Event guard mirror */
   const totalSold = ticketTypes.reduce((sum, t) => sum + safeCount(t?.sold), 0);
+  const totalReserved = ticketTypes.reduce((sum, t) => sum + safeCount(t?.reserved), 0);
   const capacityLimit = safeLimit(event?.capacity);
   const capacityKnown = Number.isFinite(capacityLimit);
 
   /* Room left under the event capacity. Unknown capacity => unbounded. */
   const eventRemaining = capacityKnown
-    ? Math.max(0, capacityLimit - totalSold)
+      ? Math.max(0, capacityLimit - totalSold - totalReserved)
     : Infinity;
 
   /* Σ of the UNCAPPED per-tier room — how many tickets the tiers can
@@ -115,11 +117,12 @@ export function computeAvailability(event) {
   const tiers = ticketTypes.map((t) => {
     const quantityLimit = safeLimit(t?.quantity);
     const sold = safeCount(t?.sold);
+    const reserved = safeCount(t?.reserved);
 
     /* Tier guard mirror, then clamped by the event guard —
        whichever binds first is what the buyer actually gets. */
     const tierRemaining = Number.isFinite(quantityLimit)
-      ? Math.max(0, quantityLimit - sold)
+      ? Math.max(0, quantityLimit - sold - reserved)
       : Infinity;
     tierRemainingSum += tierRemaining;
     const remaining = Math.max(0, Math.min(tierRemaining, eventRemaining));
@@ -128,6 +131,7 @@ export function computeAvailability(event) {
       name: t?.name ?? "",
       quantity: Number.isFinite(quantityLimit) ? quantityLimit : null,
       sold,
+      reserved,
       /* Both limits unknown => genuinely unbounded; report 0 rather than
          Infinity so JSON stays valid, but never mark it sold out. */
       remaining: Number.isFinite(remaining) ? remaining : 0,
@@ -145,6 +149,7 @@ export function computeAvailability(event) {
   return {
     capacity: capacityKnown ? capacityLimit : null,
     totalSold,
+    totalReserved,
     remaining: capacityKnown ? combinedRemaining : null,
     soldOut: capacityKnown ? combinedRemaining <= 0 : false,
     tiers,

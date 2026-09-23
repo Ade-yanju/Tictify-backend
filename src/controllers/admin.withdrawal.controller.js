@@ -4,7 +4,11 @@ import WalletTransaction from "../models/WalletTransaction.js";
 import {
   payoutToBank,
   paystackConfigured,
+  getAvailableBalance,
+  paystackTransferCharge,
 } from "../services/paystack.service.js";
+
+const PAYOUT_RETRY_DELAY_MS = 10 * 60 * 1000;
 
 /* ================= GET ALL WITHDRAWALS ================= */
 export const getAllWithdrawals = async (req, res) => {
@@ -52,10 +56,28 @@ export const approveWithdrawal = async (req, res) => {
 
     /* ── Automatic payout when Paystack is configured ── */
     if (paystackConfigured) {
+      const payAmount = withdrawal.netAmount ?? withdrawal.amount;
+      const needed = payAmount + paystackTransferCharge(payAmount);
+      const available = await getAvailableBalance();
+
+      if (available != null && available < needed) {
+        withdrawal.status = "PENDING";
+        withdrawal.processedBy = undefined;
+        withdrawal.approvedAt = undefined;
+        withdrawal.failureCode = "PAYSTACK_BALANCE_LOW";
+        withdrawal.failureReason = "Settled payout capacity is below this request.";
+        withdrawal.nextAttemptAt = new Date(Date.now() + PAYOUT_RETRY_DELAY_MS);
+        await withdrawal.save();
+        return res.json({
+          message:
+            "The withdrawal is queued and will be completed automatically when processing is available.",
+          status: "PENDING",
+        });
+      }
+
       try {
         // netAmount = amount minus the organizer-borne transfer fee
         // (legacy records without netAmount fall back to full amount)
-        const payAmount = withdrawal.netAmount ?? withdrawal.amount;
         const payout = await payoutToBank({
           amount: payAmount,
           bankDetails: withdrawal.bankDetails || {},
@@ -67,17 +89,29 @@ export const approveWithdrawal = async (req, res) => {
         paystackReference = payout.reference;
         withdrawal.status = "APPROVED";
         withdrawal.paystackReference = paystackReference;
+        withdrawal.paystackTransferCode = payout.transferCode;
+        withdrawal.paystackTransferStatus = payout.status;
         withdrawal.paystackRecipientCode = payout.recipientCode;
+        withdrawal.failureCode = undefined;
+        withdrawal.failureReason = undefined;
+        withdrawal.nextAttemptAt = undefined;
+        withdrawal.lastAttemptAt = new Date();
         await withdrawal.save();
       } catch (paystackErr) {
         /* Transfer failed → revert claim so it can be retried/rejected */
         withdrawal.status = "PENDING";
         withdrawal.processedBy = undefined;
         withdrawal.approvedAt = undefined;
+        withdrawal.failureCode = paystackErr.category || "TRANSIENT";
+        withdrawal.failureReason = paystackErr.message;
+        withdrawal.nextAttemptAt = new Date(Date.now() + PAYOUT_RETRY_DELAY_MS);
+        withdrawal.lastAttemptAt = new Date();
         await withdrawal.save();
         console.error("PAYSTACK PAYOUT ERROR:", paystackErr.message);
-        return res.status(502).json({
-          message: `Payout failed: ${paystackErr.message}. The request is back in the pending queue.`,
+        return res.status(200).json({
+          message:
+            "The payout could not be completed yet, so it remains queued for automatic retry.",
+          status: "PENDING",
         });
       }
     }
