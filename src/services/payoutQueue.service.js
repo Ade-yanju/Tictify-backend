@@ -11,8 +11,8 @@
    Money safety:
    - The wallet hold happened at OTP confirmation; this
      never touches wallet.balance.
-   - Atomic PENDING → PROCESSING claim means concurrent sweeps cannot
-     admin can never both pay the same withdrawal.
+   - Atomic PENDING → PROCESSING claim means concurrent workers cannot
+     pay the same withdrawal twice.
    - A payout the Paystack API rejects reverts to PENDING
      for the next cycle; an async transfer.failed webhook
      refunds the wallet (webhook.controller.js).
@@ -26,6 +26,7 @@ import {
   paystackTransferCharge,
 } from "./paystack.service.js";
 import { sendEmail } from "./emailProviders.service.js";
+import { createNotification } from "./notification.service.js";
 
 let sweeping = false;
 const RETRY_DELAY_MS = 10 * 60 * 1000;
@@ -41,7 +42,7 @@ function organizerQueueEmail(withdrawal, payAmount) {
         <h2 style="color:#0d0f16">Withdrawal queued</h2>
         <p>Hi ${withdrawal.organizer.name || "there"},</p>
         <p>Your withdrawal of <strong>₦${payAmount.toLocaleString()}</strong> has been confirmed and is queued for processing.</p>
-        <p>Your funds are reserved and the payout will continue automatically. You do not need to submit another request.</p>
+        <p>Your funds are reserved and the payout will continue automatically. Settlement can sometimes take longer than usual, but you do not need to submit another request.</p>
       </div>`,
   });
 }
@@ -130,6 +131,14 @@ export async function processPendingPayouts() {
         claimed.failureCode = undefined;
         claimed.nextAttemptAt = undefined;
         await claimed.save();
+        createNotification({
+          recipientId: claimed.organizer,
+          type: "WITHDRAWAL",
+          title: "Withdrawal processing",
+          message: "Your withdrawal has been sent for processing.",
+          href: "/organizer/withdraw",
+          dedupeKey: "withdrawal:" + String(claimed._id) + ":PROCESSING",
+        }).catch((e) => console.error("WITHDRAWAL NOTIFICATION ERROR:", e.message));
 
         balance -= needed;
         console.log(

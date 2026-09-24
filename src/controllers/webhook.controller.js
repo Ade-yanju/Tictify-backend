@@ -6,6 +6,7 @@ import Payment from "../models/Payment.js";
 import Ticket from "../models/Ticket.js";
 import Wallet from "../models/Wallet.js";
 import { sendEmail } from "../services/email.service.js";
+import { createNotification } from "../services/notification.service.js";
 /* Transport ONLY — the bot brain must never be imported here
    (it imports payment.controller, which imports this file) */
 import {
@@ -49,6 +50,14 @@ async function handleTransferEvent(payload, res) {
           { organizer: withdrawal.organizer },
           { $inc: { totalWithdrawn: withdrawal.amount } },
         );
+        createNotification({
+          recipientId: withdrawal.organizer,
+          type: "WITHDRAWAL",
+          title: "Withdrawal successful",
+          message: "Your withdrawal of ₦" + Number(withdrawal.netAmount || withdrawal.amount).toLocaleString() + " has been completed and sent to your bank.",
+          href: "/organizer/withdraw",
+          dedupeKey: "withdrawal:" + String(withdrawal._id) + ":SUCCESS",
+        }).catch((err) => console.error("WITHDRAWAL NOTIFICATION ERROR:", err.message));
       }
       console.log(`✅ Transfer confirmed: ${reference}`);
       return res.status(200).send("processed");
@@ -97,6 +106,15 @@ async function handleTransferEvent(payload, res) {
         reference: `WD-TRANSFER-FAIL-${withdrawal._id}`,
         description: `Bank transfer ${payload.event.split(".")[1]} — funds returned to wallet`,
       });
+
+      createNotification({
+        recipientId: withdrawal.organizer,
+        type: "WITHDRAWAL",
+        title: "Withdrawal failed",
+        message: "Your withdrawal could not be completed. The funds have been returned to your Tictify balance.",
+        href: "/organizer/withdraw",
+        dedupeKey: "withdrawal:" + String(withdrawal._id) + ":FAILED",
+      }).catch((err) => console.error("WITHDRAWAL NOTIFICATION ERROR:", err.message));
 
       console.warn(`⚠️ Transfer ${payload.event}: ${reference} — refunded`);
       return res.status(200).send("processed");
@@ -417,6 +435,8 @@ export const handlePaymentWebhook = async (req, res) => {
             eventTitle: p.event?.title || "your event",
             ticketType: p.ticketType,
             amount: p.organizerAmount,
+            quantity: p.quantity,
+            reference: p.reference,
           }),
         );
       })

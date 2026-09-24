@@ -1,6 +1,6 @@
 import express from "express";
 import { requireAuth, requireRole } from "../middlewares/auth.middleware.js";
-import { organizerDashboard } from "../controllers/dashboard.controller.js";
+import { organizerDashboard } from "../controllers/organizerDashboard.controller.js";
 
 const router = express.Router();
 

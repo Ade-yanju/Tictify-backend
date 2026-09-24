@@ -1,6 +1,7 @@
 import Withdrawal from "../models/Withdrawal.js";
 import Wallet from "../models/Wallet.js";
 import WalletTransaction from "../models/WalletTransaction.js";
+import { createNotification } from "../services/notification.service.js";
 
 
 /* ================= GET ALL WITHDRAWALS ================= */
@@ -56,6 +57,15 @@ export const rejectWithdrawal = async (req, res) => {
       reference: `WD-REFUND-${withdrawal._id}`,
       description: "Withdrawal rejected — held funds returned to wallet",
     });
+
+    createNotification({
+      recipientId: withdrawal.organizer,
+      type: "WITHDRAWAL",
+      title: "Withdrawal rejected",
+      message: "Your withdrawal was declined and the funds have been returned to your Tictify balance.",
+      href: "/organizer/withdraw",
+      dedupeKey: "withdrawal:" + String(withdrawal._id) + ":REJECTED",
+    }).catch((err) => console.error("WITHDRAWAL NOTIFICATION ERROR:", err.message));
 
     res.json({ message: "Withdrawal rejected and funds returned" });
   } catch (err) {

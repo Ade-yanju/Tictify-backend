@@ -7,6 +7,7 @@
 ===================================================== */
 import webpush from "web-push";
 import PushSubscription from "../models/PushSubscription.js";
+import { createNotification } from "../services/notification.service.js";
 
 const configured = Boolean(
   process.env.VAPID_PUBLIC_KEY && process.env.VAPID_PRIVATE_KEY,
@@ -63,8 +64,23 @@ export async function notifyNewEvent(event) {
 }
 
 /* Ticket sold → tell that event's organizer */
-export async function notifyTicketSale({ organizerId, eventTitle, ticketType, amount }) {
-  if (!configured || !organizerId) return 0;
+export async function notifyTicketSale({ organizerId, eventTitle, ticketType, amount, quantity = 1, reference }) {
+  if (!organizerId) return 0;
+
+  try {
+    await createNotification({
+      recipientId: organizerId,
+      type: "SALE",
+      title: "Ticket sold",
+      message: (quantity > 1 ? String(quantity) + " tickets" : "A ticket") + " sold for " + (eventTitle || "your event") + ".",
+      href: "/organizer/sales",
+      dedupeKey: reference ? "sale:" + reference : undefined,
+    });
+  } catch (err) {
+    console.error("IN-APP SALE NOTIFICATION ERROR:", err.message);
+  }
+
+  if (!configured) return 0;
   const subs = await PushSubscription.find({
     topic: "sales",
     organizer: organizerId,
@@ -73,7 +89,7 @@ export async function notifyTicketSale({ organizerId, eventTitle, ticketType, am
 
   return sendToSubscriptions(subs, {
     title: "💰 Ticket sold!",
-    body: `${ticketType} · ${eventTitle}${amount ? ` · ₦${Number(amount).toLocaleString()}` : ""}`,
+    body: ticketType + " · " + eventTitle + (amount ? " · ₦" + Number(amount).toLocaleString() : ""),
     url: "/organizer/dashboard",
   });
 }

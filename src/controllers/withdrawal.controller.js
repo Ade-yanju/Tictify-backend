@@ -13,6 +13,7 @@ import {
 } from "../services/paystack.service.js";
 import { sendEmail } from "../services/email.service.js";
 import User from "../models/User.js";
+import { createNotification } from "../services/notification.service.js";
 
 const MIN_WITHDRAWAL = 500; // ₦
 const MAX_WITHDRAWAL = 5_000_000; // ₦ sanity ceiling per request
@@ -39,8 +40,19 @@ function organizerStatusMessage(withdrawal) {
       return "Confirm the code sent to your email to continue this withdrawal.";
     case "PENDING":
     default:
-      return "Your withdrawal is queued and will be processed automatically. You do not need to do anything else.";
+      return "Your withdrawal is confirmed and queued. It may take a little longer while funds finish settling, but it will be processed automatically. You do not need to submit another request.";
   }
+}
+
+function notifyWithdrawal(withdrawal, status, title, message) {
+  createNotification({
+    recipientId: withdrawal.organizer,
+    type: "WITHDRAWAL",
+    title,
+    message,
+    href: "/organizer/withdraw",
+    dedupeKey: "withdrawal:" + String(withdrawal._id) + ":" + status,
+  }).catch((err) => console.error("WITHDRAWAL NOTIFICATION ERROR:", err.message));
 }
 
 function organizerWithdrawalView(withdrawal) {
@@ -197,6 +209,13 @@ export const requestWithdrawal = async (req, res) => {
       otpAttempts: 0,
     });
 
+    notifyWithdrawal(
+      withdrawal,
+      "AWAITING_OTP",
+      "Confirm your withdrawal",
+      "A withdrawal request of ₦" + amount.toLocaleString() + " is waiting for your email confirmation.",
+    );
+
     const account = await User.findById(userId).select("email name");
 
     // has this bank account been used before? (new destinations get a louder warning)
@@ -331,9 +350,15 @@ export const confirmWithdrawal = async (req, res) => {
         withdrawal.failureReason = "Settled payout capacity is below this request.";
         withdrawal.nextAttemptAt = new Date(Date.now() + PAYOUT_RETRY_DELAY_MS);
         await withdrawal.save();
+        notifyWithdrawal(
+          withdrawal,
+          "PENDING",
+          "Withdrawal queued",
+          "Your withdrawal is confirmed and will be completed automatically once processing is available.",
+        );
         return res.json({
           message:
-            "Confirmed! Your withdrawal is queued and will be completed automatically. You do not need to do anything else.",
+            "Confirmed! Your withdrawal is queued. It may take a little longer while funds finish settling, but it will be completed automatically. You do not need to do anything else.",
           status: "PENDING",
         });
       }
@@ -359,6 +384,12 @@ export const confirmWithdrawal = async (req, res) => {
         withdrawal.failureReason = undefined;
         withdrawal.nextAttemptAt = undefined;
         await withdrawal.save();
+        notifyWithdrawal(
+          withdrawal,
+          "PROCESSING",
+          "Withdrawal processing",
+          "Your withdrawal of ₦" + withdrawal.netAmount.toLocaleString() + " has been sent for processing.",
+        );
 
         return res.json({
           message: `Confirmed! ₦${withdrawal.netAmount.toLocaleString()} has been sent for processing. You do not need to do anything else.`,
@@ -376,11 +407,17 @@ export const confirmWithdrawal = async (req, res) => {
         );
         withdrawal.lastAttemptAt = new Date();
         await withdrawal.save();
+        notifyWithdrawal(
+          withdrawal,
+          "PENDING",
+          "Withdrawal queued",
+          "Your withdrawal is confirmed and will be completed automatically once processing is available.",
+        );
       }
 
       return res.json({
         message:
-          "Confirmed! Your withdrawal is queued and will be completed automatically. You do not need to do anything else.",
+          "Confirmed! Your withdrawal is queued. It may take a little longer while funds finish settling, but it will be completed automatically. You do not need to do anything else.",
         status: "PENDING",
       });
     }
