@@ -2,6 +2,7 @@ import Event from "../models/Event.js";
 import Payment from "../models/Payment.js";
 import Wallet from "../models/Wallet.js";
 import User from "../models/User.js";
+import Withdrawal from "../models/Withdrawal.js";
 import mongoose from "mongoose";
 
 const TIME_ZONE = "Africa/Lagos";
@@ -36,7 +37,7 @@ export const organizerDashboard = async (req, res) => {
       countsAsTicketSale: { $ne: false },
     };
 
-    const [organizer, events, wallet, salesByEvent, salesByDay, salesByType] =
+    const [organizer, events, wallet, salesByEvent, salesByDay, salesByType, recentPayments, recentWithdrawals] =
       await Promise.all([
         User.findById(organizerId).select("name email avatar whatsapp").lean(),
         Event.find({ organizer: organizerId }).sort({ date: -1 }).lean(),
@@ -86,6 +87,16 @@ export const organizerDashboard = async (req, res) => {
           },
           { $sort: { sold: -1, _id: 1 } },
         ]),
+        Payment.find({ organizer: organizerId, status: { $in: ["SUCCESS", "REFUNDED", "FAILED", "PENDING"] } })
+          .select("event eventTitle ticketType amount platformFee processingFee organizerAmount quantity reference status paymentType installmentAmount installmentNumber countsAsTicketSale createdAt")
+          .sort({ createdAt: -1 })
+          .limit(80)
+          .lean(),
+        Withdrawal.find({ organizer: organizerId })
+          .select("amount transferFee netAmount status bankDetails.bankName bankDetails.accountNumber createdAt updatedAt paidAt")
+          .sort({ createdAt: -1 })
+          .limit(80)
+          .lean(),
       ]);
 
     const byEvent = Object.fromEntries(
@@ -128,6 +139,68 @@ export const organizerDashboard = async (req, res) => {
       sold: Number(sale.sold || 0),
     }));
 
+    const transactionRows = [
+      ...recentPayments.map((payment) => {
+        const isInstallment = payment.paymentType === "INSTALLMENT" && payment.countsAsTicketSale === false;
+        const organizerAmount = Number(payment.organizerAmount || 0);
+        const amount = isInstallment
+          ? Number(payment.installmentAmount ?? Math.max(0, Number(payment.amount || 0) - Number(payment.processingFee || 0)))
+          : organizerAmount;
+        return {
+          id: "payment:" + String(payment._id),
+          type: isInstallment ? "INSTALLMENT" : "TICKET_SALE",
+          title: payment.eventTitle || (isInstallment ? "Installment payment" : "Ticket sale"),
+          status: payment.status,
+          direction: isInstallment ? "INFO" : "CREDIT",
+          amount,
+          settledAmount: organizerAmount,
+          grossAmount: Number(payment.amount || 0),
+          platformFee: Number(payment.platformFee || 0),
+          processingFee: Number(payment.processingFee || 0),
+          eventTitle: payment.eventTitle || "",
+          ticketType: payment.ticketType || "",
+          quantity: Number(payment.quantity || 1),
+          installmentNumber: payment.installmentNumber || null,
+          reference: payment.reference,
+          createdAt: payment.createdAt,
+        };
+      }),
+      ...recentPayments
+        .filter((payment) => Number(payment.platformFee || 0) > 0 || Number(payment.processingFee || 0) > 0)
+        .map((payment) => ({
+          id: "fee:" + String(payment._id),
+          type: "FEE",
+          title: payment.paymentType === "INSTALLMENT" ? "Installment payment fees" : "Ticket payment fees",
+          status: payment.status,
+          direction: "FEE",
+          amount: Number(payment.platformFee || 0) + Number(payment.processingFee || 0),
+          platformFee: Number(payment.platformFee || 0),
+          processingFee: Number(payment.processingFee || 0),
+          eventTitle: payment.eventTitle || "",
+          reference: payment.reference,
+          createdAt: payment.createdAt,
+        })),
+      ...recentWithdrawals.map((withdrawal) => {
+        const status = withdrawal.status === "APPROVED" ? "PROCESSING" : withdrawal.status === "PAID" ? "SUCCESS" : withdrawal.status;
+        const returned = ["FAILED", "REJECTED", "EXPIRED"].includes(status);
+        const bank = withdrawal.bankDetails || {};
+        return {
+          id: "withdrawal:" + String(withdrawal._id),
+          type: "WITHDRAWAL",
+          title: returned ? "Withdrawal returned" : "Withdrawal to bank",
+          status,
+          direction: returned ? "RETURNED" : "DEBIT",
+          amount: Number(withdrawal.amount || 0),
+          netAmount: Number(withdrawal.netAmount ?? withdrawal.amount ?? 0),
+          transferFee: Number(withdrawal.transferFee || 0),
+          bankName: bank.bankName || "Bank account",
+          accountLast4: bank.accountNumber ? String(bank.accountNumber).slice(-4) : "",
+          createdAt: withdrawal.createdAt,
+        };
+      }),
+    ]
+      .sort((a, b) => new Date(b.createdAt) - new Date(a.createdAt))
+      .slice(0, 100);
     const totalCapacity = events.reduce(
       (sum, event) => sum + Number(event.capacity || 0),
       0,
@@ -163,6 +236,7 @@ export const organizerDashboard = async (req, res) => {
       events: eventStats,
       salesTrend,
       ticketMix,
+      transactions: transactionRows,
       capacity: {
         total: totalCapacity,
         sold: stats.ticketsSold,
