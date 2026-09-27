@@ -196,6 +196,7 @@ export const requestWithdrawal = async (req, res) => {
       organizer: userId,
       amount,
       transferFee: fee,
+      otpExpiresAt: withdrawal.otpExpires.toISOString(),
       netAmount,
       bankDetails: {
         bankName,
@@ -254,6 +255,7 @@ export const requestWithdrawal = async (req, res) => {
       message: `We sent a 6-digit confirmation code to ${masked}. Enter it to release the payout.`,
       netAmount,
       transferFee: fee,
+      otpExpiresAt: withdrawal.otpExpires.toISOString(),
     });
   } catch (err) {
     console.error("WITHDRAWAL REQUEST ERROR:", err);
