@@ -46,6 +46,7 @@ app.set("trust proxy", 1);
 /* ================= CORS ================= */
 const allowedOrigins = [
   "https://tictify.vercel.app",
+  "https://tictify.ng",
   "https://www.tictify.ng",
 ];
 // Any localhost/127.0.0.1 port is allowed in development
