@@ -46,4 +46,36 @@ router.post(
   },
 );
 
+
+/* POST /api/uploads/avatar — organizer profile picture */
+router.post(
+  "/avatar",
+  authenticate,
+  authorize("organizer"),
+  upload.single("image"),
+  async (req, res) => {
+    try {
+      if (!cloudinaryConfigured) {
+        return res.status(503).json({ message: "Image uploads are temporarily unavailable" });
+      }
+      if (!req.file) {
+        return res.status(400).json({ message: "No image provided" });
+      }
+
+      const result = await new Promise((resolve, reject) => {
+        const stream = cloudinary.uploader.upload_stream(
+          { folder: "tictify/profiles", resource_type: "image" },
+          (err, out) => (err ? reject(err) : resolve(out)),
+        );
+        stream.end(req.file.buffer);
+      });
+
+      return res.json({ url: result.secure_url });
+    } catch (err) {
+      console.error("PROFILE IMAGE UPLOAD ERROR:", err.message);
+      return res.status(500).json({ message: "Profile picture upload failed" });
+    }
+  },
+);
+
 export default router;

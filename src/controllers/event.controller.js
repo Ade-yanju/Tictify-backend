@@ -253,7 +253,7 @@ export const getPublicEvents = async (_, res) => {
     const events = await Event.find({
       status: "LIVE",
       endDate: { $gt: now },
-    }).sort("date");
+    }).populate("organizer", "name avatar").sort("date");
 
     /**
      * 3️⃣ REMOVE SOLD-OUT EVENTS
@@ -283,6 +283,7 @@ export const getEventById = async (req, res) => {
     /* Accepts the pretty slug, a stale slug, or the raw ObjectId every
        link shared before slugs existed still carries. */
     const event = await findEventByIdOrSlug(req.params.id);
+    if (event) await event.populate("organizer", "name avatar");
     if (!event) {
       return res.status(404).json({ message: "Event not found" });
     }

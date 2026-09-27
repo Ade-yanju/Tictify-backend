@@ -204,6 +204,7 @@ export const register = async (req, res) => {
           name: user.name,
           role: user.role,
           whatsapp: user.whatsapp || null,
+          avatar: user.avatar || null,
         },
       });
     }
@@ -271,6 +272,7 @@ export const login = async (req, res) => {
         role: user.role,
         affiliateCode: user.affiliateCode || null,
         whatsapp: user.whatsapp || null,
+        avatar: user.avatar || null,
       },
     });
   } catch (error) {
@@ -355,6 +357,7 @@ export const verifyEmail = async (req, res) => {
         role: user.role,
         affiliateCode: user.affiliateCode || null,
         whatsapp: user.whatsapp || null,
+        avatar: user.avatar || null,
       },
     });
   } catch (error) {
@@ -481,10 +484,9 @@ export const resetPassword = async (req, res) => {
 
 /* =====================================================
    UPDATE PROFILE — PATCH /api/auth/me
-   Used by the dashboard backfill prompt ("add your WhatsApp
-   number to link your events to the bot") and by the bot's
-   own registration flow. Accepts { whatsapp }; everything else
-   is ignored rather than silently accepted.
+   Used by the organizer profile editor for { name, avatar } and by
+   the dashboard WhatsApp backfill prompt. Name and avatar are profile
+   fields; WhatsApp remains a separate protected linking flow.
 ===================================================== */
 export const updateProfile = async (req, res) => {
   try {
@@ -495,6 +497,21 @@ export const updateProfile = async (req, res) => {
     }
 
     const updates = {};
+    if (req.body.name !== undefined) {
+      const name = String(req.body.name || "").trim();
+      if (name.length < 2 || name.length > 80) {
+        return res.status(400).json({ message: "Name must be between 2 and 80 characters" });
+      }
+      updates.name = name;
+    }
+
+    if (req.body.avatar !== undefined) {
+      const avatar = String(req.body.avatar || "").trim();
+      if (avatar && (!/^https:\/\//i.test(avatar) || avatar.length > 2000)) {
+        return res.status(400).json({ message: "Profile picture URL is invalid" });
+      }
+      updates.avatar = avatar;
+    }
 
     if (req.body.whatsapp !== undefined) {
       const whatsapp = normalizeWhatsApp(req.body.whatsapp);
@@ -531,6 +548,7 @@ export const updateProfile = async (req, res) => {
         role: user.role,
         affiliateCode: user.affiliateCode || null,
         whatsapp: user.whatsapp || null,
+        avatar: user.avatar || null,
         /* The dashboard banner keys off this to know when to disappear. */
         whatsappVerifiedAt: user.whatsappVerifiedAt || null,
       },
