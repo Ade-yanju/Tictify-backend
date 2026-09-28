@@ -35,6 +35,7 @@ export const paymentSuccess = async (req, res) => {
     const qrImage = await QRCode.toDataURL(qrCode);
 
     const event = await Event.findById(payment.event);
+    const creditedOrganizer = payment.salesOrganizer || payment.organizer;
     const tierConfig = event?.ticketTypes.find(
       (t) => t.name === payment.ticketType,
     );
@@ -43,6 +44,7 @@ export const paymentSuccess = async (req, res) => {
     const ticket = await Ticket.create({
       event: payment.event,
       organizer: payment.organizer,
+      salesOrganizer: creditedOrganizer,
       buyerEmail: payment.email,
       ticketType: payment.ticketType,
       amountPaid: payment.amount,
@@ -55,7 +57,7 @@ export const paymentSuccess = async (req, res) => {
 
     // Update Wallet
     await Wallet.findOneAndUpdate(
-      { organizer: payment.organizer },
+      { organizer: creditedOrganizer },
       {
         $inc: {
           balance: payment.organizerAmount,

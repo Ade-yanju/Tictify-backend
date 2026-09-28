@@ -14,6 +14,7 @@ import {
   deliverTicketToWhatsApp,
   sendText,
 } from "../services/whatsapp.service.js";
+import { isEventSalesOrganizer } from "../services/eventCohost.service.js";
 import {
   processInstallmentPayment,
   emailInstallmentPlanUpdate,
@@ -249,6 +250,9 @@ export const handlePaymentWebhook = async (req, res) => {
         const fallbackEvent = await Event.findById(meta?.eventId).session(
           session,
         );
+        const fallbackSalesOrganizer = fallbackEvent && isEventSalesOrganizer(fallbackEvent, meta?.salesOrganizer)
+          ? meta.salesOrganizer
+          : fallbackEvent?.organizer;
 
         payment = await Payment.create(
           [
@@ -256,6 +260,7 @@ export const handlePaymentWebhook = async (req, res) => {
               reference,
               event: meta?.eventId,
               organizer: fallbackEvent?.organizer ?? null,
+              salesOrganizer: fallbackSalesOrganizer,
               ticketType: meta?.ticketType,
               email: payload.data.customer.email,
               amount: payload.data.amount / 100,
@@ -311,6 +316,7 @@ export const handlePaymentWebhook = async (req, res) => {
             {
               event: payment.event,
               organizer: payment.organizer,
+              salesOrganizer: payment.salesOrganizer || payment.organizer,
               buyerEmail: payment.email,
               qrCode,
               qrImage,
@@ -342,13 +348,14 @@ export const handlePaymentWebhook = async (req, res) => {
         }
 
         /* ── Credit wallet ── */
+        const creditedOrganizer = payment.salesOrganizer || payment.organizer;
         let wallet = await Wallet.findOne({
-          organizer: payment.organizer,
+          organizer: creditedOrganizer,
         }).session(session);
 
         if (!wallet) {
           wallet = await Wallet.create(
-            [{ organizer: payment.organizer, balance: 0, totalEarnings: 0 }],
+            [{ organizer: creditedOrganizer, balance: 0, totalEarnings: 0 }],
             { session },
           ).then((r) => r[0]);
         }

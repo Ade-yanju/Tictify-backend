@@ -180,6 +180,7 @@ export async function processInstallmentPayment(payment, session) {
         {
           event: plan.event,
           organizer: plan.organizer,
+          salesOrganizer: plan.salesOrganizer || plan.organizer,
           buyerEmail: plan.email,
           guestName: plan.name,
           qrCode,
@@ -209,13 +210,14 @@ export async function processInstallmentPayment(payment, session) {
       await event.save(session ? { session } : undefined);
     }
 
+    const creditedOrganizer = plan.salesOrganizer || plan.organizer;
     let wallet = await queryWithSession(
-      Wallet.findOne({ organizer: plan.organizer }),
+      Wallet.findOne({ organizer: creditedOrganizer }),
       session,
     );
     if (!wallet) {
       wallet = await Wallet.create(
-        [{ organizer: plan.organizer, balance: 0, totalEarnings: 0 }],
+        [{ organizer: creditedOrganizer, balance: 0, totalEarnings: 0 }],
         session ? { session } : undefined,
       ).then((rows) => rows[0]);
     }
@@ -235,6 +237,7 @@ export async function processInstallmentPayment(payment, session) {
         platformFee: plan.platformFee,
         promoter: plan.promoter,
         organizerAmount: plan.ticketSubtotal,
+        salesOrganizer: plan.salesOrganizer || plan.organizer,
       }),
     )
     .catch(() => {});

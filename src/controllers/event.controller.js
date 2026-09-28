@@ -179,7 +179,7 @@ export const duplicateEvent = async (req, res) => {
     if (!source) return res.status(404).json({ message: "Event not found" });
     const id = new mongoose.Types.ObjectId();
     const start = new Date(Date.now() + 86400000); const end = new Date(Date.now() + 90000000);
-    const event = await Event.create({ ...source, _id: id, slug: buildEventSlug(`${source.title} Copy`, id), title: `${source.title} Copy`, status: "DRAFT", date: start, endDate: end, salesEndAt: end, installmentsEnabled: false, installmentDueAt: undefined, reservedTickets: 0, ticketTypes: (source.ticketTypes || []).map(t => ({ ...t, sold: 0, reserved: 0 })) });
+    const event = await Event.create({ ...source, _id: id, slug: buildEventSlug(`${source.title} Copy`, id), title: `${source.title} Copy`, status: "DRAFT", date: start, endDate: end, salesEndAt: end, installmentsEnabled: false, installmentDueAt: undefined, reservedTickets: 0, coHosts: [], ticketTypes: (source.ticketTypes || []).map(t => ({ ...t, sold: 0, reserved: 0 })) });
     res.status(201).json(event);
   } catch (err) { console.error("DUPLICATE EVENT ERROR:", err); res.status(500).json({ message: "Could not duplicate event" }); }
 };
@@ -200,7 +200,10 @@ export const getOrganizerEvents = async (req, res) => {
     );
 
     const events = await Event.find({
-      organizer: req.user._id,
+      $or: [
+        { organizer: req.user._id },
+        { coHosts: { $elemMatch: { organizer: req.user._id, status: "ACCEPTED" } } },
+      ],
     }).sort("-createdAt");
 
     /* Low-traffic, accuracy-critical page: recount each event's tiers
@@ -220,6 +223,8 @@ export const getOrganizerEvents = async (req, res) => {
     res.json(
       events.map((event) => ({
         ...event.toObject(),
+        organizerRole: String(event.organizer) === String(req.user._id) ? "OWNER" : "CO_HOST",
+        coHosts: undefined,
         availability: computeAvailability(event),
       })),
     );
@@ -266,7 +271,7 @@ export const getPublicEvents = async (_, res) => {
     res.json(
       availableEvents.map((event) => {
         const a = computeAvailability(event);
-        return { ...event.toObject(), sold: a.totalSold, reserved: a.totalReserved, remaining: a.remaining };
+        return { ...event.toObject(), coHosts: undefined, sold: a.totalSold, reserved: a.totalReserved, remaining: a.remaining };
       }),
     );
   } catch (err) {
@@ -300,6 +305,7 @@ export const getEventById = async (req, res) => {
 
     res.json({
       ...event.toObject(),
+      coHosts: undefined,
       isSoldOut: availability.soldOut,
       /* Matches createPaymentSession's guard exactly — the page never
          promises a sale the checkout will refuse. */

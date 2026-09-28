@@ -48,6 +48,7 @@ const SESSION_STALE_MS = 24 * 60 * 60 * 1000; // reset state (not the account li
 const EMAIL_RE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 /* promo attribution: "ref CODE" anywhere in a message */
 const REF_RE = /\bref[ :]+([A-Za-z0-9-]{2,30})\b/i;
+const HOST_RE = /host[ :]+([A-Za-z0-9_-]{20,100})/i;
 
 /* 🎟️ Event deep link: "event <slug-or-code>". This is what a guest
    who tapped "Buy on WhatsApp" on a shared event arrives with, so it
@@ -260,8 +261,13 @@ function helpText() {
    a new "ref CODE" message replaces it — mirrors the web's ?ref= link */
 async function setSession(session, state, data = {}) {
   const promoter = data.promoter ?? session.data?.promoter;
+  const coHostToken = data.coHostToken ?? session.data?.coHostToken;
   session.state = state;
-  session.data = promoter ? { ...data, promoter } : { ...data };
+  session.data = {
+    ...data,
+    ...(promoter ? { promoter } : {}),
+    ...(coHostToken ? { coHostToken } : {}),
+  };
   session.markModified("data");
   await session.save();
 }
@@ -329,6 +335,12 @@ export async function handleIncoming(phone, message, transport) {
        dropping either one would cost the affiliate their commission or
        send the guest to the wrong screen. setSession carries promoter
        across every later state hop on its own. */
+    const hostMatch = input.match(HOST_RE);
+    if (hostMatch) {
+      clearOtpFields(session);
+      await setSession(session, "MENU", { coHostToken: hostMatch[1] });
+    }
+
     const refMatch = input.match(REF_RE);
     if (refMatch) {
       clearOtpFields(session);
@@ -807,6 +819,7 @@ async function showEventDetail(session, event, t, phone, prefix = "") {
     tierNames: tiers.map((tier) => tier.name),
     tierPrices: tiers.map((tier) => effectivePrice(tier, now)),
     installmentsEnabled: Boolean(event.installmentsEnabled),
+    coHostToken: session.data?.coHostToken,
     installmentMinimumPercent: event.installmentMinimumPercent,
     installmentDueAt: event.installmentDueAt,
   });
@@ -995,6 +1008,7 @@ async function createInstallmentAndReply(session, t, phone) {
       email: d.email,
       discountCode: d.discountCode,
       promoter: d.promoter,
+      coHostToken: d.coHostToken,
       waPhone: phone,
     },
   });
@@ -1054,6 +1068,7 @@ async function createAndReply(session, t, phone, payMethod) {
     name: d.name,
     email: d.email,
     promoter: d.promoter,
+    coHostToken: d.coHostToken,
     discountCode: d.discountCode,
     waPhone: phone, // QR lands back in this chat once payment confirms
   };

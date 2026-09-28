@@ -24,6 +24,8 @@ const paymentSchema = new mongoose.Schema(
       index: true,
     },
 
+    salesOrganizer: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+
     email: {
       type: String,
       required: true,

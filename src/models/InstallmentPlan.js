@@ -7,6 +7,8 @@ const installmentPlanSchema = new mongoose.Schema(
     eventTitle: { type: String, default: "" },
     organizer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true, index: true },
 
+    salesOrganizer: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+
     name: { type: String, required: true, trim: true },
     email: { type: String, required: true, lowercase: true, trim: true, index: true },
     // Set for WhatsApp-originated reservations so payment updates and the

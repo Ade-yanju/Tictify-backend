@@ -24,6 +24,7 @@ const RATE = Math.min(
 export async function creditAmbassadorCommission(payment) {
   try {
     if (!payment || payment.status !== "SUCCESS") return;
+    const creditedOrganizer = payment.salesOrganizer || payment.organizer;
 
     /* ── AFFILIATE CUT (organizer-funded, per-event opt-in) ──
        If the ?ref= code belongs to an affiliate and the event
@@ -46,7 +47,7 @@ export async function creditAmbassadorCommission(payment) {
           const dup = await WalletTransaction.findOne({ reference: ref });
           if (cut > 0 && !dup) {
             await Wallet.updateOne(
-              { organizer: payment.organizer },
+              { organizer: creditedOrganizer },
               { $inc: { balance: -cut, totalEarnings: -cut } },
             );
             await Wallet.updateOne(
@@ -56,7 +57,7 @@ export async function creditAmbassadorCommission(payment) {
             );
             await WalletTransaction.create([
               {
-                organizer: payment.organizer,
+                organizer: creditedOrganizer,
                 type: "DEBIT",
                 amount: cut,
                 reference: ref,
@@ -83,8 +84,8 @@ export async function creditAmbassadorCommission(payment) {
     /* Resolve which ambassador (if any) earns this sale */
     let code = payment.promoter;
     let source = "promoter link";
-    if (!code && payment.organizer) {
-      const organizer = await User.findById(payment.organizer).select("referredBy");
+    if (!code && creditedOrganizer) {
+      const organizer = await User.findById(creditedOrganizer).select("referredBy");
       if (organizer?.referredBy) {
         code = organizer.referredBy;
         source = "onboarded organizer";

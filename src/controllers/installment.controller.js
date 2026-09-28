@@ -18,6 +18,7 @@ import {
 } from "../services/installment.service.js";
 import { salesCloseAt } from "./event.controller.js";
 import { resolveDiscount } from "./discount.controller.js";
+import { resolveSalesOrganizer } from "../services/eventCohost.service.js";
 
 const BACKEND = process.env.BACKEND_URL || "https://tictify-backend.onrender.com";
 const FRONTEND = process.env.FRONTEND_URL || "https://tictify.vercel.app";
@@ -79,6 +80,7 @@ export const initiateInstallment = async (req, res) => {
       name,
       discountCode: rawDiscountCode,
       promoter,
+      coHostToken,
     } = req.body || {};
     const email = cleanEmail(req.body?.email);
     const guestName = String(name || "").trim();
@@ -90,6 +92,13 @@ export const initiateInstallment = async (req, res) => {
     const event = await findEventByIdOrSlug(eventId);
     if (!event || event.status !== "LIVE") {
       return res.status(400).json({ message: "Event unavailable" });
+    }
+    const attributionEvent = await Event.findById(event._id).select("+coHosts.salesTokenHash +coHosts.inviteTokenHash");
+    let salesOrganizer;
+    try {
+      salesOrganizer = resolveSalesOrganizer(attributionEvent || event, coHostToken);
+    } catch (error) {
+      return res.status(error.status || 400).json({ message: error.message });
     }
     if (!event.installmentsEnabled) {
       return res.status(400).json({ message: "Installment payments are not enabled for this event" });
@@ -160,6 +169,7 @@ export const initiateInstallment = async (req, res) => {
       event: event._id,
       eventTitle: event.title,
       organizer: event.organizer,
+      salesOrganizer,
       name: guestName,
       email,
       waPhone,
@@ -186,6 +196,7 @@ export const initiateInstallment = async (req, res) => {
       event: event._id,
       eventTitle: event.title,
       organizer: event.organizer,
+      salesOrganizer,
       ticketType,
       email,
       waPhone,
@@ -224,6 +235,7 @@ export const initiateInstallment = async (req, res) => {
           email,
           customerName: guestName,
           installmentPlan: String(plan._id),
+          salesOrganizer: String(plan.salesOrganizer || plan.organizer),
           installmentAmount: initialPrincipal,
         },
       }),
@@ -324,6 +336,7 @@ export const payInstallment = async (req, res) => {
       event: plan.event._id,
       eventTitle: plan.event.title,
       organizer: plan.organizer,
+      salesOrganizer: plan.salesOrganizer || plan.organizer,
       ticketType: plan.ticketType,
       email: plan.email,
       waPhone: plan.waPhone,
@@ -359,6 +372,7 @@ export const payInstallment = async (req, res) => {
           email: plan.email,
           customerName: plan.name,
           installmentPlan: String(plan._id),
+          salesOrganizer: String(plan.salesOrganizer || plan.organizer),
           installmentAmount: requested,
         },
       }),
@@ -377,7 +391,13 @@ export const payInstallment = async (req, res) => {
 
 export const getOrganizerInstallments = async (req, res) => {
   try {
-    const filter = { organizer: req.user._id };
+    const filter = {
+      $or: [
+        { salesOrganizer: req.user._id },
+        { salesOrganizer: { $exists: false }, organizer: req.user._id },
+        { salesOrganizer: null, organizer: req.user._id },
+      ],
+    };
     if (req.query.eventId) filter.event = req.query.eventId;
     const plans = await InstallmentPlan.find(filter)
       .populate("event", "title date")

@@ -6,11 +6,17 @@ import { getPaystackAccountSnapshot } from "../services/paystack.service.js";
 
 export const adminAnalytics = async (req, res) => {
   try {
-    const revenueByMonth = await Ticket.aggregate([
+    /* Payment is the financial source of truth. Ticket rows can be absent
+       for pending or failed checkouts, while successful payments are what
+       the admin KPIs and finance view reconcile against. Keep `total` for
+       the dedicated analytics page and expose a chart-friendly alias too. */
+    const revenueByMonth = await Payment.aggregate([
+      { $match: { status: "SUCCESS" } },
       {
         $group: {
           _id: { $month: "$createdAt" },
-          total: { $sum: "$amountPaid" },
+          total: { $sum: { $ifNull: ["$amount", 0] } },
+          totalRevenue: { $sum: { $ifNull: ["$amount", 0] } },
         },
       },
       { $sort: { _id: 1 } },
@@ -36,26 +42,31 @@ export const adminAnalytics = async (req, res) => {
       { $sort: { _id: 1 } },
     ]);
 
-    /* ================= NEW: PLATFORM FEES ================= */
-    const platformFeesByMonth = await Ticket.aggregate([
+    /* ================= PLATFORM FEES ================= */
+    const platformFeesByMonth = await Payment.aggregate([
+      { $match: { status: "SUCCESS" } },
       {
         $group: {
           _id: { $month: "$createdAt" },
-          total: {
-            $sum: {
-              $add: [{ $multiply: ["$amountPaid", 0.03] }, 80],
-            },
-          },
-        },
-      },
-      {
-        $project: {
-          _id: 1,
-          total: { $round: ["$total", 0] },
+          total: { $sum: { $ifNull: ["$platformFee", 0] } },
+          platformFees: { $sum: { $ifNull: ["$platformFee", 0] } },
         },
       },
       { $sort: { _id: 1 } },
     ]);
+
+    const monthlyRevenue = revenueByMonth.map((row) => {
+      const matchingFees = platformFeesByMonth.find(
+        (fee) => String(fee._id) === String(row._id),
+      );
+
+      return {
+        _id: row._id,
+        totalRevenue: row.totalRevenue ?? row.total ?? 0,
+        platformFees:
+          row.platformFees ?? matchingFees?.platformFees ?? matchingFees?.total ?? 0,
+      };
+    });
 
     /* Leaderboards the analytics page reads (e.event.title / e.sold /
        e.revenue and o.organizer.name / o.sold / o.revenue). Built off
@@ -99,7 +110,7 @@ export const adminAnalytics = async (req, res) => {
         { $match: { status: "SUCCESS" } },
         {
           $group: {
-            _id: "$organizer",
+            _id: { $ifNull: ["$salesOrganizer", "$organizer"] },
             revenue: { $sum: "$amount" },
             sold: {
               $sum: {
@@ -131,6 +142,7 @@ export const adminAnalytics = async (req, res) => {
 
     res.json({
       revenueByMonth,
+      monthlyRevenue,
       ticketsByMonth,
       eventsByMonth,
       platformFeesByMonth, // ✅ NEW (non-breaking)

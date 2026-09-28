@@ -32,7 +32,11 @@ export const organizerDashboard = async (req, res) => {
     const trendStart = new Date(now.getTime() - 6 * 24 * 60 * 60 * 1000);
 
     const saleMatch = {
-      organizer: organizerId,
+      $or: [
+        { salesOrganizer: organizerId },
+        { salesOrganizer: { $exists: false }, organizer: organizerId },
+        { salesOrganizer: null, organizer: organizerId },
+      ],
       status: "SUCCESS",
       countsAsTicketSale: { $ne: false },
     };
@@ -40,7 +44,10 @@ export const organizerDashboard = async (req, res) => {
     const [organizer, events, wallet, salesByEvent, salesByDay, salesByType, recentPayments, recentWithdrawals] =
       await Promise.all([
         User.findById(organizerId).select("name email avatar whatsapp").lean(),
-        Event.find({ organizer: organizerId }).sort({ date: -1 }).lean(),
+        Event.find({ $or: [
+          { organizer: organizerId },
+          { coHosts: { $elemMatch: { organizer: organizerId, status: "ACCEPTED" } } },
+        ] }).sort({ date: -1 }).lean(),
         Wallet.findOneAndUpdate(
           { organizer: organizerId },
           { $setOnInsert: { organizer: organizerId, balance: 0, totalEarnings: 0 } },
@@ -87,7 +94,14 @@ export const organizerDashboard = async (req, res) => {
           },
           { $sort: { sold: -1, _id: 1 } },
         ]),
-        Payment.find({ organizer: organizerId, status: { $in: ["SUCCESS", "REFUNDED", "FAILED", "PENDING"] } })
+        Payment.find({
+          $or: [
+            { salesOrganizer: organizerId },
+            { salesOrganizer: { $exists: false }, organizer: organizerId },
+            { salesOrganizer: null, organizer: organizerId },
+          ],
+          status: { $in: ["SUCCESS", "REFUNDED", "FAILED", "PENDING"] },
+        })
           .select("event eventTitle ticketType amount platformFee processingFee organizerAmount quantity reference status paymentType installmentAmount installmentNumber countsAsTicketSale createdAt")
           .sort({ createdAt: -1 })
           .limit(80)

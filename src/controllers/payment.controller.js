@@ -17,6 +17,7 @@ import {
 import { computeFees as sharedComputeFees } from "../utils/paymentFees.js";
 import { effectivePrice as sharedEffectivePrice } from "../utils/pricing.js";
 import InstallmentPlan from "../models/InstallmentPlan.js";
+import { resolveSalesOrganizer, isEventSalesOrganizer } from "../services/eventCohost.service.js";
 import {
   processInstallmentPayment,
   emailInstallmentPlanUpdate,
@@ -158,6 +159,7 @@ export async function createPaymentSession({
   promoter: rawPromoter,
   discountCode: rawDiscountCode,
   waPhone: rawWaPhone,
+  coHostToken,
   /* "link" (default, Paystack checkout URL — the web always uses this)
      or "transfer" (dedicated bank account via the Charge API, used by
      the WhatsApp bot so guests can pay without leaving the chat) */
@@ -186,6 +188,13 @@ export async function createPaymentSession({
     /* From here on the id must be the REAL ObjectId — it is written to
        Payment.event and shipped to Paystack as metadata. */
     eventId = event._id;
+    const attributionEvent = await Event.findById(event._id).select("+coHosts.salesTokenHash +coHosts.inviteTokenHash");
+    let salesOrganizer;
+    try {
+      salesOrganizer = resolveSalesOrganizer(attributionEvent || event, coHostToken);
+    } catch (error) {
+      return { ok: false, status: error.status || 400, message: error.message };
+    }
 
     /* 2️⃣ TIME GUARDS */
     /* Sales run until salesCloseAt (defaults to endDate) — NOT until the
@@ -290,6 +299,7 @@ export async function createPaymentSession({
         event: eventId,
         eventTitle: event.title,
         organizer: event.organizer,
+        salesOrganizer,
         ticketType,
         email,
         amount: 0,
@@ -305,6 +315,7 @@ export async function createPaymentSession({
       await Ticket.create({
         event: event._id,
         organizer: event.organizer,
+        salesOrganizer,
         buyerEmail: email,
         qrCode,
         qrImage,
@@ -357,6 +368,7 @@ export async function createPaymentSession({
       event: eventId,
       eventTitle: event.title,
       organizer: event.organizer, // ✅ always saved upfront
+      salesOrganizer,
       ticketType,
       email,
       amount: totalAmount,
@@ -389,7 +401,7 @@ export async function createPaymentSession({
             amount: totalAmount * 100, // Kobo
             reference,
             bank_transfer: {},
-            metadata: { eventId, ticketType, email, customerName: name },
+            metadata: { eventId, ticketType, email, customerName: name, salesOrganizer: String(salesOrganizer) },
           }),
         });
         const chargeData = await chargeRes.json();
@@ -472,7 +484,7 @@ export async function createPaymentSession({
           reference,
           currency: "NGN",
           callback_url: `${process.env.BACKEND_URL || "https://tictify-backend.onrender.com"}/api/payments/callback`,
-          metadata: { eventId, ticketType, email, customerName: name },
+          metadata: { eventId, ticketType, email, customerName: name, salesOrganizer: String(salesOrganizer) },
         }),
       },
     );
@@ -520,6 +532,7 @@ export const initiatePayment = async (req, res) => {
     promoter: req.body.promoter,
     discountCode: req.body.discountCode,
     waPhone: req.body.waPhone,
+    coHostToken: req.body.coHostToken,
     /* Default "link" — callers that don't ask for transfer are unaffected */
     payMethod: req.body.payMethod === "transfer" ? "transfer" : "link",
   });
@@ -601,11 +614,15 @@ export const paymentCallback = async (req, res) => {
       );
       const { metadata } = verifyData.data;
       const fallbackEvent = await Event.findById(metadata.eventId);
+      const fallbackSalesOrganizer = fallbackEvent && isEventSalesOrganizer(fallbackEvent, metadata?.salesOrganizer)
+        ? metadata.salesOrganizer
+        : fallbackEvent?.organizer;
 
       payment = await Payment.create({
         reference,
         event: metadata.eventId,
         organizer: fallbackEvent?.organizer ?? null, // ✅ always populate organizer
+        salesOrganizer: fallbackSalesOrganizer,
         ticketType: metadata.ticketType,
         email: metadata.email,
         amount: verifyData.data.amount / 100,
@@ -674,6 +691,7 @@ export const paymentCallback = async (req, res) => {
     await Ticket.create({
       event: payment.event,
       organizer: payment.organizer,
+      salesOrganizer: payment.salesOrganizer || payment.organizer,
       buyerEmail: payment.email,
       qrCode,
       qrImage,
@@ -699,15 +717,16 @@ export const paymentCallback = async (req, res) => {
       await event.save();
     }
 
-    /* 7️⃣ Credit organizer wallet ✅ */
+    /* 7️⃣ Credit the organizer whose signed sales link generated this order. */
+    const creditedOrganizer = payment.salesOrganizer || payment.organizer;
     await Wallet.findOneAndUpdate(
-      { organizer: payment.organizer },
+      { organizer: creditedOrganizer },
       {
         $inc: {
           balance: payment.organizerAmount,
           totalEarnings: payment.organizerAmount,
         },
-        $setOnInsert: { organizer: payment.organizer },
+        $setOnInsert: { organizer: creditedOrganizer },
       },
       { upsert: true },
     );

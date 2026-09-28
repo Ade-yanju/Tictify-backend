@@ -14,9 +14,22 @@ import {
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
 import { requireWhatsApp } from "../middlewares/requireWhatsApp.js";
 import { getEventTemplates } from "../controllers/eventTemplates.controller.js";
+import {
+  getCohostInvite,
+  inviteCohost,
+  listCohosts,
+  regenerateInviteLink,
+  acceptCohostInvite,
+  generateCohostSalesLink,
+  revokeCohost,
+} from "../controllers/eventCohost.controller.js";
 
 const router = express.Router();
 router.get("/templates", getEventTemplates);
+
+/* Co-host invitation links are intentionally token-based and store only hashes. */
+router.get("/cohosts/invite/:token", getCohostInvite);
+router.post("/cohosts/invite/:token/accept", authenticate, authorize("organizer"), acceptCohostInvite);
 
 /* ================= CREATE =================
    Creating a NEW event requires a WhatsApp number on the account —
@@ -43,6 +56,12 @@ router.patch(
 );
 
 router.patch("/end/:id", authenticate, authorize("organizer"), endEvent);
+
+router.get("/:id/cohosts", authenticate, authorize("organizer"), listCohosts);
+router.post("/:id/cohosts/invite", authenticate, authorize("organizer"), inviteCohost);
+router.post("/:id/cohosts/:cohostId/invite-link", authenticate, authorize("organizer"), regenerateInviteLink);
+router.post("/:id/cohosts/:cohostId/sales-link", authenticate, authorize("organizer"), generateCohostSalesLink);
+router.delete("/:id/cohosts/:cohostId", authenticate, authorize("organizer"), revokeCohost);
 
 /* ================= DELETE (FIXED) ================= */
 router.delete("/:id", authenticate, authorize("organizer"), deleteEvent);

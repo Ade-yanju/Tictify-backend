@@ -903,7 +903,11 @@ export const getOrganizerTicketSales = async (req, res) => {
   try {
     const organizerId = new mongoose.Types.ObjectId(req.user._id);
     const totalsAgg = await Ticket.aggregate([
-      { $match: { organizer: organizerId } },
+      { $match: { $or: [
+        { salesOrganizer: organizerId },
+        { salesOrganizer: { $exists: false }, organizer: organizerId },
+        { salesOrganizer: null, organizer: organizerId },
+      ] } },
       {
         $group: {
           _id: null,

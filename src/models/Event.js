@@ -14,6 +14,21 @@ const ticketTypeSchema = new mongoose.Schema(
   { _id: false },
 );
 
+const coHostSchema = new mongoose.Schema(
+  {
+    organizer: { type: mongoose.Schema.Types.ObjectId, ref: "User", required: true },
+    email: { type: String, lowercase: true, trim: true },
+    status: { type: String, enum: ["PENDING", "ACCEPTED", "REVOKED"], default: "PENDING" },
+    inviteTokenHash: { type: String, select: false },
+    salesTokenHash: { type: String, select: false },
+    invitedBy: { type: mongoose.Schema.Types.ObjectId, ref: "User" },
+    invitedAt: { type: Date, default: Date.now },
+    acceptedAt: Date,
+    revokedAt: Date,
+  },
+  { timestamps: true },
+);
+
 const eventSchema = new mongoose.Schema(
   {
     organizer: {
@@ -21,6 +36,8 @@ const eventSchema = new mongoose.Schema(
       ref: "User",
       required: true,
     },
+
+    coHosts: { type: [coHostSchema], default: [] },
 
     title: { type: String, required: true },
 

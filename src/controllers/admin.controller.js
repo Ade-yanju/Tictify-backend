@@ -20,7 +20,7 @@ export const getAdminOrganizers = async (req, res) => {
         { $match: { status: "SUCCESS" } },
         {
           $group: {
-            _id: "$organizer",
+            _id: { $ifNull: ["$salesOrganizer", "$organizer"] },
             ticketsSold: {
               $sum: {
                 $cond: [
@@ -45,7 +45,7 @@ export const getAdminOrganizers = async (req, res) => {
         },
       ]),
       Event.aggregate([
-        { $group: { _id: "$organizer", count: { $sum: 1 } } },
+        { $group: { _id: { $ifNull: ["$salesOrganizer", "$organizer"] }, count: { $sum: 1 } } },
       ]),
     ]);
 
@@ -226,7 +226,7 @@ export const getAdminAnalytics = async (_, res) => {
     { $match: { status: "SUCCESS" } },
     {
       $group: {
-        _id: "$organizer",
+        _id: { $ifNull: ["$salesOrganizer", "$organizer"] },
         revenue: { $sum: "$amount" },
         sold: {
           $sum: {

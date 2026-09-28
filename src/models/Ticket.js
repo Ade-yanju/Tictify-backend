@@ -68,6 +68,8 @@ const ticketSchema = new mongoose.Schema(
       index: true, // improves sales queries
     },
 
+    salesOrganizer: { type: mongoose.Schema.Types.ObjectId, ref: "User", index: true },
+
     amountPaid: {
       type: Number,
       min: 0,

@@ -4,7 +4,11 @@ import Ticket from "../models/Ticket.js";
 export const getOrganizerSales = async (req, res) => {
   try {
     const tickets = await Ticket.find({
-      organizer: req.user._id,
+      $or: [
+        { salesOrganizer: req.user._id },
+        { salesOrganizer: { $exists: false }, organizer: req.user._id },
+        { salesOrganizer: null, organizer: req.user._id },
+      ],
     }).populate("event", "title");
 
     const totalRevenue = tickets.reduce((sum, t) => sum + t.amountPaid, 0);

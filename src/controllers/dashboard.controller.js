@@ -11,7 +11,10 @@ export const organizerDashboard = async (req, res) => {
 
     const [organizer, events, wallet, salesByEvent] = await Promise.all([
       User.findById(organizerId).select("name email avatar whatsapp").lean(),
-      Event.find({ organizer: organizerId }).sort({ date: -1 }).lean(),
+      Event.find({ $or: [
+        { organizer: organizerId },
+        { coHosts: { $elemMatch: { organizer: organizerId, status: "ACCEPTED" } } },
+      ] }).sort({ date: -1 }).lean(),
       Wallet.findOneAndUpdate(
         { organizer: organizerId },
         { $setOnInsert: { organizer: organizerId, balance: 0, totalEarnings: 0 } },
@@ -22,7 +25,11 @@ export const organizerDashboard = async (req, res) => {
       Payment.aggregate([
         {
           $match: {
-            organizer: organizerId,
+            $or: [
+              { salesOrganizer: organizerId },
+              { salesOrganizer: { $exists: false }, organizer: organizerId },
+              { salesOrganizer: null, organizer: organizerId },
+            ],
             status: "SUCCESS",
             countsAsTicketSale: { $ne: false },
           },
