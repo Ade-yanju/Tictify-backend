@@ -196,7 +196,6 @@ export const requestWithdrawal = async (req, res) => {
       organizer: userId,
       amount,
       transferFee: fee,
-      otpExpiresAt: withdrawal.otpExpires.toISOString(),
       netAmount,
       bankDetails: {
         bankName,
