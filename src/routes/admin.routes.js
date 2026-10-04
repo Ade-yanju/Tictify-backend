@@ -60,7 +60,7 @@ router.post("/broadcast/send", authenticate, adminOnly, sendBroadcast);
 router.get("/affiliates", authenticate, adminOnly, getAdminAffiliates);
 router.patch("/affiliates/:id/toggle", authenticate, adminOnly, toggleAdminAffiliate);
 
-/* NOTE: /withdrawals (list, approve, reject) lives in
+/* NOTE: /withdrawals (read-only log) lives in
    admin.withdrawal.routes.js — do not redefine it here.
    A duplicate GET /withdrawals previously shadowed the real
    admin controller with the organizer-scoped one, so the

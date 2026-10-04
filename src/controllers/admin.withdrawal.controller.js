@@ -1,7 +1,4 @@
 import Withdrawal from "../models/Withdrawal.js";
-import Wallet from "../models/Wallet.js";
-import WalletTransaction from "../models/WalletTransaction.js";
-import { createNotification } from "../services/notification.service.js";
 
 
 /* ================= GET ALL WITHDRAWALS ================= */
@@ -16,60 +13,5 @@ export const getAllWithdrawals = async (req, res) => {
   } catch (err) {
     console.error("ADMIN WITHDRAWALS ERROR:", err);
     res.status(500).json({ message: "Failed to load withdrawals" });
-  }
-};
-
-
-/* =====================================================
-   REJECT WITHDRAWAL — refunds the held amount atomically
-===================================================== */
-export const rejectWithdrawal = async (req, res) => {
-  try {
-    /* Atomic claim prevents double-refund by two admins */
-    const withdrawal = await Withdrawal.findOneAndUpdate(
-      { _id: req.params.id, status: "PENDING" },
-      {
-        status: "REJECTED",
-        processedBy: req.user._id,
-        approvedAt: new Date(),
-      },
-      { new: true },
-    );
-
-    if (!withdrawal) {
-      const exists = await Withdrawal.findById(req.params.id);
-      return exists
-        ? res.status(400).json({ message: "Already processed" })
-        : res.status(404).json({ message: "Withdrawal not found" });
-    }
-
-    /* ── Return the held funds to the organizer ── */
-    await Wallet.updateOne(
-      { organizer: withdrawal.organizer },
-      { $inc: { balance: withdrawal.amount } },
-      { upsert: true },
-    );
-
-    await WalletTransaction.create({
-      organizer: withdrawal.organizer,
-      type: "CREDIT",
-      amount: withdrawal.amount,
-      reference: `WD-REFUND-${withdrawal._id}`,
-      description: "Withdrawal rejected — held funds returned to wallet",
-    });
-
-    createNotification({
-      recipientId: withdrawal.organizer,
-      type: "WITHDRAWAL",
-      title: "Withdrawal rejected",
-      message: "Your withdrawal was declined and the funds have been returned to your Tictify balance.",
-      href: "/organizer/withdraw",
-      dedupeKey: "withdrawal:" + String(withdrawal._id) + ":REJECTED",
-    }).catch((err) => console.error("WITHDRAWAL NOTIFICATION ERROR:", err.message));
-
-    res.json({ message: "Withdrawal rejected and funds returned" });
-  } catch (err) {
-    console.error("REJECT WITHDRAWAL ERROR:", err);
-    res.status(500).json({ message: "Rejection failed" });
   }
 };

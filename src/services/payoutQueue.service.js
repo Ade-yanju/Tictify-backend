@@ -101,7 +101,7 @@ export async function processPendingPayouts() {
         continue; // still settling — smaller ones may fit
       }
 
-      /* Atomic claim — loses gracefully if an admin approved it first */
+      /* Atomic claim — loses gracefully if another worker claimed it first */
       const claimed = await Withdrawal.findOneAndUpdate(
         { _id: w._id, status: "PENDING" },
         {

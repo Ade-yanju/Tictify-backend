@@ -1,7 +1,7 @@
 /* =====================================================
    PAYSTACK PAYOUTS
-   One place for transfer logic — used by both the admin
-   approval flow and the auto-payout flow.
+   One place for transfer logic used by the automatic
+   payout flow after organizer confirmation.
 
    NOTE: Paystack transfers are ASYNC. The API accepting a
    transfer does NOT mean the money moved — the final word
