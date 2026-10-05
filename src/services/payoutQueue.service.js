@@ -31,8 +31,20 @@ import { createNotification } from "./notification.service.js";
 let sweeping = false;
 const RETRY_DELAY_MS = 10 * 60 * 1000;
 
+function isLagosWeekend() {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Africa/Lagos",
+    weekday: "short",
+  }).format(new Date());
+  return weekday === "Sat" || weekday === "Sun";
+}
+
 function organizerQueueEmail(withdrawal, payAmount) {
   if (!withdrawal.organizer?.email || withdrawal.organizerNotifiedAt) return null;
+
+  const timingNote = isLagosWeekend()
+    ? "Bank processing can take longer over the weekend."
+    : "Processing will continue automatically.";
 
   return sendEmail({
     to: withdrawal.organizer.email,
@@ -42,7 +54,7 @@ function organizerQueueEmail(withdrawal, payAmount) {
         <h2 style="color:#0d0f16">Withdrawal queued</h2>
         <p>Hi ${withdrawal.organizer.name || "there"},</p>
         <p>Your withdrawal of <strong>₦${payAmount.toLocaleString()}</strong> has been confirmed and is queued for processing.</p>
-        <p>Your funds are reserved and the payout will continue automatically. Settlement can sometimes take longer than usual, but you do not need to submit another request.</p>
+        <p>Your funds are reserved and the payout will continue automatically. ${timingNote} You do not need to submit another request.</p>
       </div>`,
   });
 }

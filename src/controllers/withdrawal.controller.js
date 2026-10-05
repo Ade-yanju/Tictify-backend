@@ -23,6 +23,21 @@ function canonicalWithdrawalStatus(status) {
   return status === "APPROVED" ? "PROCESSING" : status === "PAID" ? "SUCCESS" : status;
 }
 
+function isLagosWeekend() {
+  const weekday = new Intl.DateTimeFormat("en-US", {
+    timeZone: "Africa/Lagos",
+    weekday: "short",
+  }).format(new Date());
+  return weekday === "Sat" || weekday === "Sun";
+}
+
+function queuedWithdrawalMessage() {
+  if (isLagosWeekend()) {
+    return "Your withdrawal is confirmed and queued. Bank processing can take longer over the weekend, and it will retry automatically during the next available processing window. You do not need to submit another request.";
+  }
+  return "Your withdrawal is confirmed and queued. It will be processed automatically. You do not need to submit another request.";
+}
+
 function organizerStatusMessage(withdrawal) {
   const status = canonicalWithdrawalStatus(withdrawal?.status);
   switch (status) {
@@ -40,7 +55,7 @@ function organizerStatusMessage(withdrawal) {
       return "Confirm the code sent to your email to continue this withdrawal.";
     case "PENDING":
     default:
-      return "Your withdrawal is confirmed and queued. It may take a little longer while funds finish settling, but it will be processed automatically. You do not need to submit another request.";
+      return queuedWithdrawalMessage();
   }
 }
 
@@ -355,11 +370,10 @@ export const confirmWithdrawal = async (req, res) => {
           withdrawal,
           "PENDING",
           "Withdrawal queued",
-          "Your withdrawal is confirmed and will be completed automatically once processing is available.",
+          queuedWithdrawalMessage(),
         );
         return res.json({
-          message:
-            "Confirmed! Your withdrawal is queued. It may take a little longer while funds finish settling, but it will be completed automatically. You do not need to do anything else.",
+          message: queuedWithdrawalMessage(),
           status: "PENDING",
         });
       }
@@ -412,13 +426,12 @@ export const confirmWithdrawal = async (req, res) => {
           withdrawal,
           "PENDING",
           "Withdrawal queued",
-          "Your withdrawal is confirmed and will be completed automatically once processing is available.",
+          queuedWithdrawalMessage(),
         );
       }
 
       return res.json({
-        message:
-          "Confirmed! Your withdrawal is queued. It may take a little longer while funds finish settling, but it will be completed automatically. You do not need to do anything else.",
+        message: queuedWithdrawalMessage(),
         status: "PENDING",
       });
     }

@@ -80,12 +80,13 @@ export function transferFee() {
   return STAMP_DUTY + PLATFORM_WITHDRAWAL_FEE; // ₦100 flat
 }
 
-/* What Paystack charges US to send a transfer (their published NGN bands).
-   Needed to know if the Paystack Balance can really cover a payout. */
+/* What Paystack charges us to send a Nigerian transfer (published NGN bands),
+   including the ₦50 statutory stamp duty for transfers of ₦10,000 or more.
+   This is used before payout so the balance check matches the provider debit. */
 export function paystackTransferCharge(amount) {
-  if (amount <= 5000) return 10;
-  if (amount <= 50000) return 25;
-  return 50;
+  const transferFee = amount <= 5000 ? 10 : amount <= 50000 ? 25 : 50;
+  const stampDuty = amount >= 10000 ? 50 : 0;
+  return transferFee + stampDuty;
 }
 
 /* Available (settled) NGN balance in naira, or null if the check failed.
