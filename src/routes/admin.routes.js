@@ -4,6 +4,7 @@ import { adminOnly } from "../middlewares/admin.middleware.js";
 
 import { adminDashboard } from "../controllers/admin.dashboard.controller.js";
 import { adminAnalytics, adminFinance, adminReconcilePending } from "../controllers/admin.analytics.controller.js";
+import { adminDailyReport } from "../controllers/admin.dailyReport.controller.js";
 import {
   getAdminOrganizers,
   getAdminEvents,
@@ -31,6 +32,7 @@ router.get("/dashboard", authenticate, adminOnly, adminDashboard);
 /* ================= ANALYTICS ================= */
 router.get("/analytics", authenticate, adminOnly, adminAnalytics);
 router.get("/finance", authenticate, adminOnly, adminFinance);
+router.get("/daily-report", authenticate, adminOnly, adminDailyReport);
 router.post("/reconcile-pending", authenticate, adminOnly, adminReconcilePending);
 
 /* ================= ORGANIZERS ================= */
