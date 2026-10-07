@@ -1,5 +1,6 @@
 import Payment from "../models/Payment.js";
 import WalletTransaction from "../models/WalletTransaction.js";
+import PageVisit from "../models/PageVisit.js";
 
 const REPORT_TIME_ZONE = "Africa/Lagos";
 const DATE_PATTERN = /^\d{4}-\d{2}-\d{2}$/;
@@ -47,6 +48,8 @@ function emptyDay(date) {
     processingFees: 0,
     affiliatePaid: 0,
     affiliatePayments: 0,
+    pageVisits: 0,
+    uniqueVisitors: 0,
   };
 }
 
@@ -84,7 +87,7 @@ export const adminDailyReport = async (req, res) => {
       },
     };
 
-    const [paymentRows, affiliateRows] = await Promise.all([
+    const [paymentRows, affiliateRows, pageVisitRows, uniqueIpRows] = await Promise.all([
       Payment.aggregate([
         { $match: { status: "SUCCESS", createdAt: { $gte: start, $lt: end } } },
         {
@@ -134,7 +137,25 @@ export const adminDailyReport = async (req, res) => {
         },
         { $sort: { _id: 1 } },
       ]),
+      PageVisit.aggregate([
+        { $match: { date: { $gte: from, $lte: to } } },
+        {
+          $group: {
+            _id: "$date",
+            pageVisits: { $sum: "$visits" },
+            uniqueIps: { $addToSet: "$ip" },
+          },
+        },
+        { $sort: { _id: 1 } },
+      ]),
+      PageVisit.distinct("ip", { date: { $gte: from, $lte: to } }),
     ]);
+
+    const visitorDetails = await PageVisit.find({ date: { $gte: from, $lte: to } })
+      .select("date path ip visits lastVisitedAt")
+      .sort({ date: -1, lastVisitedAt: -1 })
+      .limit(2000)
+      .lean();
 
     const byDay = new Map();
     for (let date = from; date <= to; date = addDays(date, 1)) {
@@ -164,6 +185,13 @@ export const adminDailyReport = async (req, res) => {
       byDay.set(row._id, day);
     }
 
+    for (const row of pageVisitRows) {
+      const day = byDay.get(row._id) || emptyDay(row._id);
+      day.pageVisits = Number(row.pageVisits || 0);
+      day.uniqueVisitors = Array.isArray(row.uniqueIps) ? row.uniqueIps.length : 0;
+      byDay.set(row._id, day);
+    }
+
     const rows = [...byDay.values()];
     const totals = rows.reduce(
       (result, row) => {
@@ -173,6 +201,7 @@ export const adminDailyReport = async (req, res) => {
       emptyDay("TOTAL"),
     );
     delete totals.date;
+    totals.uniqueVisitors = uniqueIpRows.filter(Boolean).length;
 
     return res.json({
       timezone: REPORT_TIME_ZONE,
@@ -180,6 +209,7 @@ export const adminDailyReport = async (req, res) => {
       to,
       rows,
       totals,
+      visitorDetails,
       refreshedAt: new Date().toISOString(),
     });
   } catch (error) {

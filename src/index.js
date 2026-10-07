@@ -27,6 +27,8 @@ import feedbackRoutes from "./routes/feedback.routes.js";
 import cronRoutes from "./routes/cron.routes.js";
 import whatsappRoutes from "./routes/whatsapp.routes.js";
 import installmentRoutes from "./routes/installment.routes.js";
+import pageVisitRoutes from "./routes/pageVisit.routes.js";
+import PageVisit from "./models/PageVisit.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
 import { reconcileAllSold } from "./services/soldReconcile.service.js";
 import { sendUpcomingEventReminders } from "./services/eventReminder.service.js";
@@ -101,12 +103,16 @@ app.use("/api/affiliates", affiliateRoutes);
 app.use("/api/feedback", feedbackRoutes);
 app.use("/api/cron", cronRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
+app.use("/api/page-visits", pageVisitRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;
 
 await mongoose.connect(process.env.MONGO_URI);
 console.log("MongoDB connected");
+// Apply the daily route+IP counter index if this collection was created by
+// an earlier page-only version of the tracker.
+await PageVisit.syncIndexes();
 
 // Bind explicitly to 0.0.0.0 so Render's port scanner always sees us
 app.listen(PORT, "0.0.0.0", () => {
