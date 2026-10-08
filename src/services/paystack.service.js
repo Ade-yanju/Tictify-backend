@@ -53,6 +53,21 @@ function paystackError(message, category = "TRANSIENT") {
   return error;
 }
 
+function normalizeLedgerEntries(entries = []) {
+  return entries
+    .filter((entry) => !entry.currency || entry.currency === "NGN")
+    .map((entry) => ({
+      id: entry.id,
+      difference: Number(entry.difference || 0) / 100,
+      balance: Number(entry.balance || 0) / 100,
+      currency: entry.currency || "NGN",
+      reason: entry.reason || "",
+      source: entry.model_responsible || "Paystack",
+      sourceId: entry.model_row || null,
+      createdAt: entry.createdAt || entry.created_at || null,
+    }));
+}
+
 function classifyTransferError(message = "") {
   const text = String(message).toLowerCase();
   if (/duplicate|already exists|unique reference|reference already/.test(text)) {
@@ -130,6 +145,44 @@ export async function resolvePaystackAccount({ accountNumber, bankCode }) {
   return body.data || null;
 }
 
+/* Paystack balance ledger page used by the dedicated admin activity screen. */
+export async function getPaystackAccountActivity({ page = 1, perPage = 25 } = {}) {
+  const empty = {
+    configured: paystackConfigured,
+    entries: [],
+    meta: { total: 0, skipped: 0, perPage, page, pageCount: 0 },
+    fetchedAt: null,
+    error: null,
+  };
+
+  if (!paystackConfigured) return { ...empty, error: "Paystack is not configured" };
+
+  try {
+    const body = await paystackGet("/balance/ledger", { perPage, page });
+    return {
+      ...empty,
+      entries: normalizeLedgerEntries(body.data || []),
+      meta: body.meta || empty.meta,
+      fetchedAt: new Date().toISOString(),
+    };
+  } catch (error) {
+    return { ...empty, error: error.message || "Paystack ledger unavailable" };
+  }
+}
+
+/* A balance-ledger Transfer row exposes Paystack's internal model_row. Fetch
+   its transfer record so the admin screen can match the provider reference to
+   Tictify's local organizer withdrawal without guessing from amount/date. */
+export async function getPaystackTransfer(idOrCode) {
+  if (!paystackConfigured || idOrCode == null || idOrCode === "") return null;
+  try {
+    const body = await paystackGet(`/transfer/${encodeURIComponent(idOrCode)}`);
+    return body.data || null;
+  } catch {
+    return null;
+  }
+}
+
 /* Live Paystack account view for admin reporting. The ledger endpoint is
    intentionally limited to the latest page: the database aggregates below
    remain the all-time Tictify audit totals, while these entries reconcile the
@@ -179,16 +232,7 @@ export async function getPaystackAccountSnapshot({ perPage = 20 } = {}) {
     const sourceEntries = (ledgerResult.value.data || []).filter(
       (entry) => !entry.currency || entry.currency === "NGN",
     );
-    const ledger = sourceEntries.map((entry) => ({
-      id: entry.id,
-      difference: Number(entry.difference || 0) / 100,
-      balance: Number(entry.balance || 0) / 100,
-      currency: entry.currency || "NGN",
-      reason: entry.reason || "",
-      source: entry.model_responsible || "Paystack",
-      sourceId: entry.model_row || null,
-      createdAt: entry.createdAt || entry.created_at || null,
-    }));
+    const ledger = normalizeLedgerEntries(sourceEntries);
 
     snapshot.ledger = ledger;
     snapshot.ledgerMeta = ledgerResult.value.meta || null;
