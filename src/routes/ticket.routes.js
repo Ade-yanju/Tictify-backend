@@ -17,6 +17,10 @@ import {
 } from "../controllers/ticket.controller.js";
 
 import { authenticate, authorize } from "../middlewares/auth.middleware.js";
+import {
+  authenticateScanAccess,
+  allowScanAccess,
+} from "../middlewares/gate.middleware.js";
 
 const router = express.Router();
 
@@ -57,8 +61,8 @@ router.get(
 
 router.post(
   "/scan",
-  authenticate,
-  authorize("organizer"),
+  authenticateScanAccess,
+  allowScanAccess,
   scanTicketController,
 );
 
@@ -66,21 +70,21 @@ router.post(
 router.post("/free", authenticate, authorize("organizer"), createFreeTicket);
 
 /* Live gate dashboard + promoter leaderboard + guest list */
-router.get("/gate/:eventId", authenticate, authorize("organizer"), getGateStats);
+router.get("/gate/:eventId", authenticateScanAccess, allowScanAccess, getGateStats);
 router.get("/promoters/:eventId", authenticate, authorize("organizer"), getPromoterStats);
 router.get("/export/:eventId", authenticate, authorize("organizer"), exportGuestList);
 
 /* Offline gate: cache the manifest, replay queued admits (organizer/admin) */
 router.get(
   "/gate/manifest/:eventId",
-  authenticate,
-  authorize("organizer", "admin"),
+  authenticateScanAccess,
+  allowScanAccess,
   getGateManifest,
 );
 router.post(
   "/gate/sync/:eventId",
-  authenticate,
-  authorize("organizer", "admin"),
+  authenticateScanAccess,
+  allowScanAccess,
   syncGateAdmits,
 );
 

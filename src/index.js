@@ -28,6 +28,7 @@ import cronRoutes from "./routes/cron.routes.js";
 import whatsappRoutes from "./routes/whatsapp.routes.js";
 import installmentRoutes from "./routes/installment.routes.js";
 import pageVisitRoutes from "./routes/pageVisit.routes.js";
+import gateRoutes from "./routes/gate.routes.js";
 import PageVisit from "./models/PageVisit.js";
 import Feedback from "./models/Feedback.js";
 import { processPendingPayouts } from "./services/payoutQueue.service.js";
@@ -105,6 +106,7 @@ app.use("/api/feedback", feedbackRoutes);
 app.use("/api/cron", cronRoutes);
 app.use("/api/whatsapp", whatsappRoutes);
 app.use("/api/page-visits", pageVisitRoutes);
+app.use("/api/gate", gateRoutes);
 
 /* ================= SERVER ================= */
 const PORT = process.env.PORT || 5000;

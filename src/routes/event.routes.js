@@ -23,6 +23,11 @@ import {
   generateCohostSalesLink,
   revokeCohost,
 } from "../controllers/eventCohost.controller.js";
+import {
+  listGateStaff,
+  createGateStaff,
+  revokeGateStaff,
+} from "../controllers/gateStaff.controller.js";
 
 const router = express.Router();
 router.get("/templates", getEventTemplates);
@@ -62,6 +67,10 @@ router.post("/:id/cohosts/invite", authenticate, authorize("organizer"), inviteC
 router.post("/:id/cohosts/:cohostId/invite-link", authenticate, authorize("organizer"), regenerateInviteLink);
 router.post("/:id/cohosts/:cohostId/sales-link", authenticate, authorize("organizer"), generateCohostSalesLink);
 router.delete("/:id/cohosts/:cohostId", authenticate, authorize("organizer"), revokeCohost);
+
+router.get("/:id/gate-staff", authenticate, authorize("organizer"), listGateStaff);
+router.post("/:id/gate-staff", authenticate, authorize("organizer"), createGateStaff);
+router.delete("/:id/gate-staff/:staffId", authenticate, authorize("organizer"), revokeGateStaff);
 
 /* ================= DELETE (FIXED) ================= */
 router.delete("/:id", authenticate, authorize("organizer"), deleteEvent);

@@ -5,6 +5,7 @@ import Ticket from "../models/Ticket.js";
 import Payment from "../models/Payment.js";
 import { findEventByIdOrSlug } from "../utils/resolveEvent.js";
 import { sendEmail } from "../services/email.service.js";
+import { gateStaffEventMatches } from "../middlewares/gate.middleware.js";
 
 /* Public base URL of THIS backend — used for QR image links in emails
    (email clients block base64 data-URI images) */
@@ -19,7 +20,12 @@ export const getGateStats = async (req, res) => {
   try {
     const { eventId } = req.params;
     const event = await findEventByIdOrSlug(eventId);
-    if (!event || event.organizer.toString() !== req.user._id.toString()) {
+    const isAdmin = req.user?.role === "admin";
+    if (
+      !event ||
+      !gateStaffEventMatches(req, event?._id) ||
+      (!isAdmin && event.organizer.toString() !== req.user._id.toString())
+    ) {
       return res.status(403).json({ message: "Access denied" });
     }
 
@@ -38,10 +44,10 @@ export const getGateStats = async (req, res) => {
     const s = agg[0] || { ticketsSold: 0, guestsExpected: 0, guestsAdmitted: 0 };
     return res.json({
       eventTitle: event.title,
-      ticketsSold: s.ticketsSold,
       guestsExpected: s.guestsExpected,
       guestsAdmitted: s.guestsAdmitted,
       guestsRemaining: Math.max(0, s.guestsExpected - s.guestsAdmitted),
+      ...(req.user?.role === "gate_staff" ? {} : { ticketsSold: s.ticketsSold }),
     });
   } catch (err) {
     console.error("GATE STATS ERROR:", err);
@@ -457,9 +463,14 @@ export async function performScan({
   const eventOrganizer =
     found.event?.organizer?.toString() || found.organizer?.toString();
   const isAdmin = actingUser?.role === "admin";
+  const isGateStaff = actingUser?.role === "gate_staff";
+  const gateEventMatches =
+    !isGateStaff ||
+    String(actingUser?.gateEventId || "") === String(found.event?._id || "");
   if (
     !eventOrganizer ||
-    (!isAdmin && eventOrganizer !== String(actingUser?._id || ""))
+    (!isAdmin &&
+      (!gateEventMatches || eventOrganizer !== String(actingUser?._id || "")))
   ) {
     return {
       admitted: false,
@@ -577,7 +588,10 @@ export const scanTicketController = async (req, res) => {
 
     return res.json({
       message: result.message,
-      attendee: result.attendee,
+      attendee:
+        req.user?.role === "gate_staff"
+          ? result.guestName || "Guest"
+          : result.attendee,
       ticketType: result.ticketType,
       admitted: result.admittedCount,
       groupSize: result.groupSize,
@@ -780,7 +794,11 @@ async function loadOwnedEvent(req, res) {
     return null;
   }
   const isAdmin = req.user?.role === "admin";
-  if (!isAdmin && event.organizer.toString() !== req.user._id.toString()) {
+  if (
+    !isAdmin &&
+    (!gateStaffEventMatches(req, event._id) ||
+      event.organizer.toString() !== req.user._id.toString())
+  ) {
     res.status(403).json({ message: "Access denied" });
     return null;
   }
@@ -804,7 +822,8 @@ export const getGateManifest = async (req, res) => {
       tickets: tickets.map((t) => ({
         reference: t.paymentRef,
         qrCode: t.qrCode,
-        guestName: t.guestName || t.buyerEmail,
+        guestName:
+          t.guestName || (req.user?.role === "gate_staff" ? "Guest" : t.buyerEmail),
         ticketType: t.ticketType || "",
         groupSize: Math.max(1, t.groupSize || 1),
         admittedCount: t.admittedCount || 0,
