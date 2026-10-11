@@ -1,12 +1,13 @@
 import Wallet from "../models/Wallet.js";
 import WalletTransaction from "../models/WalletTransaction.js";
+import { computeFees } from "./paymentFees.js";
 
 export async function creditOrganizerWallet({
   organizerId,
   grossAmount,
   reference,
 }) {
-  const platformFee = Math.round(grossAmount * 0.03) + 80;
+  const platformFee = computeFees(grossAmount).platformFee;
   const netAmount = Math.max(grossAmount - platformFee, 0);
 
   let wallet = await Wallet.findOne({ organizer: organizerId });

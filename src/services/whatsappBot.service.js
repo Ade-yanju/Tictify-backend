@@ -1053,7 +1053,7 @@ function breakdownText(d, result) {
   if (result.discountAmount > 0) {
     lines.push(`Discount (${d.discountCode}): −${fmtNaira(result.discountAmount)}`);
   }
-  lines.push(`Platform fee: ${fmtNaira(result.platformFee)}`);
+  lines.push(`Platform fee (₦50 + 2%): ${fmtNaira(result.platformFee)}`);
   lines.push(`Processing fee: ${fmtNaira(result.processingFee)}`);
   lines.push(`*Total: ${fmtNaira(result.total)}*`);
   return lines.join("\n");

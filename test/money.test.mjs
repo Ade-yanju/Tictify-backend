@@ -3,18 +3,18 @@ import assert from "node:assert/strict";
 import { computeFees } from "../src/controllers/payment.controller.js";
 import { transferFee } from "../src/services/paystack.service.js";
 
-test("computeFees: ₦5,000 ticket → guest pays 5,408, organizer gets 5,000", () => {
+test("computeFees: ₦5,000 ticket → guest pays 5,327, organizer gets 5,000", () => {
   const f = computeFees(5000);
-  assert.equal(f.platformFee, 230);      // 3% + 80
-  assert.equal(f.processingFee, 178);    // 1.5% of 5,230 + 100
-  assert.equal(f.total, 5408);
+  assert.equal(f.platformFee, 150);      // ₦50 + 2%
+  assert.equal(f.processingFee, 177);    // 1.5% of 5,150 + 100
+  assert.equal(f.total, 5327);
 });
 
 test("computeFees: under ₦2,500 waives the ₦100 processing flat fee", () => {
   const f = computeFees(1000);
-  assert.equal(f.platformFee, 110);
-  assert.equal(f.processingFee, 17);     // 1.5% of 1,110, no +100
-  assert.equal(f.total, 1127);
+  assert.equal(f.platformFee, 70);
+  assert.equal(f.processingFee, 16);     // 1.5% of 1,070, no +100
+  assert.equal(f.total, 1086);
 });
 
 test("computeFees: processing fee caps at ₦2,000", () => {

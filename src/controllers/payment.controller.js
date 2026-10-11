@@ -63,7 +63,7 @@ export function effectivePrice(tier, at = new Date()) {
 
 /* =====================================================
    FEES
-   - Platform fee (Tictify): 3% + ₦80 — funds the product
+   - Platform fee (Tictify): ₦50 + 2% of the ticket subtotal — funds the product
    - Processing fee (Paystack): 1.5% + ₦100 (₦100 waived
      under ₦2,500), capped at ₦2,000 — paid by the GUEST
      so the organizer always receives the full ticket price.
